@@ -121,7 +121,6 @@ def plot_alignment(mel_spec, f0, phonemes, output_path, config=None, time_scale=
         ax=ax1
     )
     ax1.set_title('Mel Spectrogram')
-    fig.colorbar(img, ax=ax1, format='%+2.0f dB')
     ax1.grid(axis='x', color='white', linestyle='--', linewidth=0.5, alpha=0.5)
     
     # Second layer: F0 contour

@@ -5,13 +5,15 @@ import numpy as np
 import yaml
 
 from utils.utils_general import load_config
+from utils.utils_dsp import extract_mel_spectrogram
 
-def test_read_h5py(bin_path):
+def test_read_h5py(bin_path, config):
     """
-    Test reading from an h5py binary file and print its contents.
+    Test reading from an h5py binary file, print its contents, and generate visualization.
     
     Args:
         bin_path (str): Path to the binary file
+        config (dict): Configuration dictionary
     """
     print(f"\nTesting read from {bin_path}:")
     try:
@@ -44,6 +46,34 @@ def test_read_h5py(bin_path):
             print("First 5 entries:")
             for i in range(min(5, len(phone_texts))):
                 print(f"  {phone_texts[i]}: start={phone_starts[i]}, end={phone_ends[i]}, duration={phone_durations[i]}")
+            
+            # Check if mel spectrogram and F0 are present
+            mel_spec = None
+            f0 = None
+            
+            if 'MEL_SPEC' in data_group:
+                mel_spec = data_group['MEL_SPEC'][:]
+                print(f"MEL_SPEC shape: {mel_spec.shape}")
+                
+            if 'F0' in data_group:
+                f0 = data_group['F0'][:]
+                print(f"F0 shape: {f0.shape}")
+                
+            # Generate visualization if both mel and F0 are available
+            if mel_spec is not None and f0 is not None:
+                # Create plots directory if it doesn't exist
+                plots_dir = config.get('audio', {}).get('plots_dir', 'plots')
+                os.makedirs(plots_dir, exist_ok=True)
+                
+                # Get base filename without extension
+                base_filename = os.path.splitext(os.path.basename(bin_path))[0]
+                plot_path = os.path.join(plots_dir, f"{base_filename}_visualization.png")
+                
+                # Import the plotting function from utils_dsp
+                from utils.utils_dsp import plot_mel_and_f0
+                
+                # Plot and save
+                plot_mel_and_f0(mel_spec, f0, plot_path)
     except Exception as e:
         print(f"Error reading h5py file: {e}")
         
@@ -86,15 +116,54 @@ def parse_lab_file(file_path):
     
     return phonemes
 
-def save_to_h5py(bin_path, phonemes, file_path, phone_map):
+def find_wav_file(lab_file_path, raw_dir):
     """
-    Save phoneme data to h5py binary file.
+    Find the corresponding .wav file for a .lab file.
+    
+    Args:
+        lab_file_path (str): Path to the .lab file
+        raw_dir (str): Raw directory path
+        
+    Returns:
+        str: Path to the corresponding .wav file, or None if not found
+    """
+    # Get the base filename without extension
+    base_filename = os.path.splitext(os.path.basename(lab_file_path))[0]
+    
+    # Get the directory of the lab file
+    lab_dir = os.path.dirname(lab_file_path)
+    
+    # Try to find wav file in parallel 'wav' directory
+    wav_dir = lab_dir.replace('/lab/', '/wav/')
+    if '/lab/' not in wav_dir:
+        wav_dir = lab_dir.replace('\\lab\\', '\\wav\\')
+    
+    wav_file_path = os.path.join(wav_dir, f"{base_filename}.wav")
+    
+    # Check if the wav file exists
+    if os.path.exists(wav_file_path):
+        return wav_file_path
+    
+    # If not found, try to find it in the raw directory's wav folder
+    wav_file_path = os.path.join(raw_dir, "wav", f"{base_filename}.wav")
+    
+    if os.path.exists(wav_file_path):
+        return wav_file_path
+    
+    print(f"Warning: Could not find corresponding .wav file for {lab_file_path}")
+    return None
+
+def save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec=None, f0=None):
+    """
+    Save phoneme data, mel spectrogram, and F0 to h5py binary file.
     
     Args:
         bin_path (str): Path to the binary file
         phonemes (list): List of phoneme tuples (start_time, end_time, phoneme)
         file_path (str): Original file path to save as FILE_NAME
         phone_map (list): List of unique phonemes
+        mel_spec (numpy.ndarray, optional): Mel spectrogram
+        f0 (numpy.ndarray, optional): F0 contour
     """
     # Create arrays for each component
     phone_starts = np.array([p[0] for p in phonemes])
@@ -130,10 +199,23 @@ def save_to_h5py(bin_path, phonemes, file_path, phone_map):
         
         # Save the total duration in the data group
         data_group.create_dataset('TOTAL_DURATION', data=np.array([total_duration]))
+        
+        # Save the mel spectrogram if provided
+        if mel_spec is not None:
+            data_group.create_dataset('MEL_SPEC', data=mel_spec)
+            
+        # Save the F0 contour if provided
+        if f0 is not None:
+            data_group.create_dataset('F0', data=f0)
     
+    '''
     print(f"Saved phoneme data to {bin_path}")
     print(f"Total duration: {total_duration}")
-    print(f"Phone map: {phone_map}")
+    if mel_spec is not None:
+        print(f"Mel spectrogram shape: {mel_spec.shape}")
+    if f0 is not None:
+        print(f"F0 contour shape: {f0.shape}")'
+    '''
 
 def collect_unique_phonemes(lab_files):
     """
@@ -169,14 +251,6 @@ def update_config_with_phone_map(config, phone_map, config_path="config/default.
     """
     # Update the phone_map in the config
     config['data']['phone_map'] = phone_map
-    
-    # Write back to the config file
-    try:
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-        print(f"Updated configuration file {config_path} with phone map")
-    except Exception as e:
-        print(f"Error updating configuration file: {e}")
 
 def main():
     """
@@ -192,6 +266,10 @@ def main():
     # Ensure bin directory exists
     os.makedirs(bin_dir, exist_ok=True)
     
+    # Create plots directory if it doesn't exist
+    plots_dir = config.get('audio', {}).get('plots_dir', 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
     lab_files = list_lab_files(raw_dir)
     
     # Collect unique phonemes from all files
@@ -206,17 +284,35 @@ def main():
         phonemes = parse_lab_file(file_path)
         
         # Print phoneme count
-        print(f"Found {len(phonemes)} phonemes:")
+        #print(f"Found {len(phonemes)} phonemes")
         
         # Generate bin filename
         base_filename = os.path.splitext(os.path.basename(file_path))[0]
         bin_path = os.path.join(bin_dir, f"{base_filename}.h5")
         
-        # Save to h5py binary file
-        save_to_h5py(bin_path, phonemes, file_path, phone_map)
+        # Find the corresponding wav file
+        wav_file_path = find_wav_file(file_path, raw_dir)
         
-        # Test reading the binary file
-        test_read_h5py(bin_path)
+        # Extract mel spectrogram and F0 if wav file found
+        mel_spec = None
+        f0 = None
+        if wav_file_path:
+            #print(f"Found corresponding .wav file: {wav_file_path}")
+            
+            # Extract mel spectrogram
+            mel_spec = extract_mel_spectrogram(wav_file_path, config)
+            
+            # Extract F0 contour
+            from utils.utils_dsp import extract_f0
+            f0 = extract_f0(wav_file_path, config)
+        else:
+            print(f"Warning: No corresponding .wav file found for {file_path}")
+        
+        # Save to h5py binary file
+        save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec, f0)
+        
+        # Test reading the binary file and generate visualization
+        test_read_h5py(bin_path, config)
 
 if __name__ == "__main__":
     main()

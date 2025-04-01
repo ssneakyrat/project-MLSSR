@@ -57,3 +57,14 @@ data:
   - y
   - z
   raw_dir: datasets/gin
+audio:
+  sample_rate: 22050  # Default sample rate for audio processing
+  n_fft: 1024         # FFT size
+  hop_length: 256     # Hop length for the STFT
+  win_length: 1024    # Window length for the STFT
+  n_mels: 80          # Number of mel bands
+  fmin: 0             # Minimum frequency for mel spectrogram
+  fmax: 8000          # Maximum frequency for mel spectrogram
+  f0_min: 50          # Minimum F0 frequency in Hz
+  f0_max: 600         # Maximum F0 frequency in Hz
+  plots_dir: logs/preprocess/plots    # Directory to save visualization plots

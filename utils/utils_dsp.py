@@ -157,3 +157,49 @@ def estimate_phoneme_midi_notes(f0, phonemes, hop_length, sample_rate, time_scal
         phoneme_midi_notes.append((phone, midi_note))
     
     return phoneme_midi_notes
+
+def midi_to_hz(midi_note):
+    """
+    Convert a MIDI note number to frequency in Hz.
+    
+    Args:
+        midi_note (float): MIDI note number
+        
+    Returns:
+        float: Frequency in Hz
+    """
+    if midi_note <= 0:  # Handle zero or negative values
+        return 0
+    return 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
+
+def hz_to_midi(frequency):
+    """
+    Convert a frequency in Hz to MIDI note number.
+    
+    Args:
+        frequency (float): Frequency in Hz
+        
+    Returns:
+        float: MIDI note number
+    """
+    if frequency <= 0:  # Handle zero or negative values
+        return 0
+    return 69 + 12 * np.log2(frequency / 440.0)
+
+def get_note_name(midi_number):
+    """
+    Convert MIDI note number to note name (e.g., C4, A#3).
+    
+    Args:
+        midi_number (int): MIDI note number
+        
+    Returns:
+        str: Note name
+    """
+    if midi_number <= 0:
+        return "Rest"
+        
+    note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+    octave = (midi_number // 12) - 1
+    note = note_names[midi_number % 12]
+    return f"{note}{octave}"

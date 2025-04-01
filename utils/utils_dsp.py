@@ -75,3 +75,85 @@ def extract_f0(wav_path, config):
     except Exception as e:
         print(f"Error extracting F0 from {wav_path}: {e}")
         return None
+
+def f0_to_midi(f0):
+    """
+    Convert fundamental frequency (F0) values in Hz to MIDI note numbers.
+    
+    Args:
+        f0 (numpy.ndarray): F0 contour in Hz
+        
+    Returns:
+        numpy.ndarray: MIDI note numbers
+    """
+    # The formula for converting frequency to MIDI note number is:
+    # MIDI = 69 + 12 * log2(f0/440)
+    # where 69 is A4 (440 Hz)
+    
+    # Create a copy of the f0 array
+    midi_notes = np.zeros_like(f0)
+    
+    # Only convert non-zero values (voiced regions)
+    voiced = f0 > 0
+    
+    # Apply the formula for voiced regions
+    if np.any(voiced):
+        midi_notes[voiced] = 69 + 12 * np.log2(f0[voiced]/440)
+    
+    return midi_notes
+
+def estimate_phoneme_midi_notes(f0, phonemes, hop_length, sample_rate, time_scale=1e-7):
+    """
+    Estimate the MIDI note for each phoneme based on the F0 contour.
+    
+    Args:
+        f0 (numpy.ndarray): F0 contour
+        phonemes (list): List of phoneme tuples (start_time, end_time, phoneme)
+        hop_length (int): Hop length used for F0 extraction
+        sample_rate (int): Sample rate of the audio
+        time_scale (float): Scale factor to convert phoneme timings to seconds
+        
+    Returns:
+        list: List of tuples (phoneme, estimated MIDI note)
+    """
+    # Convert f0 to MIDI notes
+    midi_notes = f0_to_midi(f0)
+    
+    # Create a list to store the estimated MIDI notes for each phoneme
+    phoneme_midi_notes = []
+    
+    # For each phoneme, calculate the average MIDI note
+    for start, end, phone in phonemes:
+        # Convert phoneme start and end times to seconds
+        start_sec = start * time_scale
+        end_sec = end * time_scale
+        
+        # Convert seconds to frame indices
+        start_frame = int(start_sec * sample_rate / hop_length)
+        end_frame = int(end_sec * sample_rate / hop_length)
+        
+        # Ensure frame indices are within the bounds of the f0 array
+        start_frame = max(0, start_frame)
+        end_frame = min(len(midi_notes), end_frame)
+        
+        # Extract MIDI notes for this phoneme
+        if start_frame < end_frame:
+            phoneme_midi = midi_notes[start_frame:end_frame]
+            
+            # Calculate the average MIDI note for voiced regions
+            voiced = phoneme_midi > 0
+            if np.any(voiced):
+                avg_midi = np.mean(phoneme_midi[voiced])
+                # Round to nearest semitone
+                midi_note = round(avg_midi)
+            else:
+                # Unvoiced phoneme (consonant)
+                midi_note = 0
+        else:
+            # Phoneme is too short to have any frames
+            midi_note = 0
+        
+        # Store the phoneme and its MIDI note
+        phoneme_midi_notes.append((phone, midi_note))
+    
+    return phoneme_midi_notes

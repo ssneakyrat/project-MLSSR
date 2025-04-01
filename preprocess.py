@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 
 from utils.utils_general import load_config, plot_alignment
-from utils.utils_dsp import extract_mel_spectrogram, extract_f0
+from utils.utils_dsp import extract_mel_spectrogram, extract_f0, f0_to_midi, estimate_phoneme_midi_notes
 
 def test_read_h5py(bin_path, config):
     """
@@ -46,9 +46,10 @@ def test_read_h5py(bin_path, config):
             for i in range(min(5, len(phone_texts))):
                 print(f"  {phone_texts[i]}: start={phone_starts[i]}, end={phone_ends[i]}, duration={phone_durations[i]}")
             
-            # Check if mel spectrogram and F0 are present
+            # Check if mel spectrogram, F0, and MIDI_NOTES are present
             mel_spec = None
             f0 = None
+            midi_notes = None
             
             if 'MEL_SPEC' in data_group:
                 mel_spec = data_group['MEL_SPEC'][:]
@@ -57,6 +58,16 @@ def test_read_h5py(bin_path, config):
             if 'F0' in data_group:
                 f0 = data_group['F0'][:]
                 print(f"F0 shape: {f0.shape}")
+                
+            if 'MIDI_NOTES' in data_group:
+                midi_notes = data_group['MIDI_NOTES'][:]
+                print(f"MIDI_NOTES shape: {midi_notes.shape}")
+                
+            if 'PHONEME_MIDI' in data_group:
+                phoneme_midi = data_group['PHONEME_MIDI'][:]
+                print(f"PHONEME_MIDI (first 5 entries):")
+                for i in range(min(5, len(phoneme_midi))):
+                    print(f"  {phone_texts[i]}: MIDI note = {phoneme_midi[i]}")
                 
             # Generate visualization if both mel and F0 are available
             if mel_spec is not None and f0 is not None:
@@ -69,15 +80,25 @@ def test_read_h5py(bin_path, config):
                 
                 # Create phoneme tuples for alignment visualization
                 phoneme_tuples = []
+                phoneme_midi_tuples = []
                 for i in range(len(phone_texts)):
                     phoneme_tuples.append((phone_starts[i], phone_ends[i], phone_texts[i]))
-                
-                # Import the alignment plotting function
-                from utils.utils_general import plot_alignment
+                    if 'PHONEME_MIDI' in data_group:
+                        phoneme_midi_tuples.append((phone_starts[i], phone_ends[i], phone_texts[i], phoneme_midi[i]))
+                    else:
+                        phoneme_midi_tuples = None
                 
                 # Generate and save the alignment visualization
                 alignment_plot_path = os.path.join(plots_dir, f"{base_filename}_alignment.png")
-                plot_alignment(mel_spec, f0, phoneme_tuples, alignment_plot_path, config)
+                plot_alignment(
+                    mel_spec, 
+                    f0, 
+                    phoneme_tuples, 
+                    alignment_plot_path, 
+                    config, 
+                    phoneme_midi=phoneme_midi_tuples,
+                    midi_notes=midi_notes
+                )
                 
     except Exception as e:
         print(f"Error reading h5py file: {e}")
@@ -158,9 +179,9 @@ def find_wav_file(lab_file_path, raw_dir):
     print(f"Warning: Could not find corresponding .wav file for {lab_file_path}")
     return None
 
-def save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec=None, f0=None):
+def save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec=None, f0=None, midi_notes=None, phoneme_midi=None):
     """
-    Save phoneme data, mel spectrogram, and F0 to h5py binary file.
+    Save phoneme data, mel spectrogram, F0, and MIDI notes to h5py binary file.
     
     Args:
         bin_path (str): Path to the binary file
@@ -169,6 +190,8 @@ def save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec=None, f0=Non
         phone_map (list): List of unique phonemes
         mel_spec (numpy.ndarray, optional): Mel spectrogram
         f0 (numpy.ndarray, optional): F0 contour
+        midi_notes (numpy.ndarray, optional): MIDI note values from F0
+        phoneme_midi (numpy.ndarray, optional): MIDI note values for each phoneme
     """
     # Create arrays for each component
     phone_starts = np.array([p[0] for p in phonemes])
@@ -212,6 +235,14 @@ def save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec=None, f0=Non
         # Save the F0 contour if provided
         if f0 is not None:
             data_group.create_dataset('F0', data=f0)
+            
+        # Save the MIDI notes if provided
+        if midi_notes is not None:
+            data_group.create_dataset('MIDI_NOTES', data=midi_notes)
+            
+        # Save the phoneme MIDI notes if provided
+        if phoneme_midi is not None:
+            data_group.create_dataset('PHONEME_MIDI', data=phoneme_midi)
     
     '''
     print(f"Saved phoneme data to {bin_path}")
@@ -219,9 +250,13 @@ def save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec=None, f0=Non
     if mel_spec is not None:
         print(f"Mel spectrogram shape: {mel_spec.shape}")
     if f0 is not None:
-        print(f"F0 contour shape: {f0.shape}")'
+        print(f"F0 contour shape: {f0.shape}")
+    if midi_notes is not None:
+        print(f"MIDI notes shape: {midi_notes.shape}")
+    if phoneme_midi is not None:
+        print(f"Phoneme MIDI notes shape: {phoneme_midi.shape}")
     '''
-
+    
 def collect_unique_phonemes(lab_files):
     """
     Collect unique phonemes from all lab files.
@@ -288,33 +323,59 @@ def main():
         print(f"\nProcessing file: {file_path}")
         phonemes = parse_lab_file(file_path)
         
-        # Print phoneme count
-        #print(f"Found {len(phonemes)} phonemes")
-        
-        # Generate bin filename
-        base_filename = os.path.splitext(os.path.basename(file_path))[0]
-        bin_path = os.path.join(bin_dir, f"{base_filename}.h5")
-        
         # Find the corresponding wav file
         wav_file_path = find_wav_file(file_path, raw_dir)
         
-        # Extract mel spectrogram and F0 if wav file found
+        # Extract mel spectrogram, F0, and calculate MIDI notes if wav file found
         mel_spec = None
         f0 = None
+        midi_notes = None
+        phoneme_midi = None
         if wav_file_path:
-            #print(f"Found corresponding .wav file: {wav_file_path}")
+            print(f"Found corresponding .wav file: {wav_file_path}")
             
             # Extract mel spectrogram
             mel_spec = extract_mel_spectrogram(wav_file_path, config)
             
             # Extract F0 contour
-            from utils.utils_dsp import extract_f0
             f0 = extract_f0(wav_file_path, config)
+            
+            # Convert F0 to MIDI notes
+            if f0 is not None:
+                midi_notes = f0_to_midi(f0)
+                
+                # Estimate MIDI notes for each phoneme
+                sample_rate = config['audio']['sample_rate']
+                hop_length = config['audio']['hop_length']
+                phoneme_midi_tuples = estimate_phoneme_midi_notes(
+                    f0, 
+                    phonemes, 
+                    hop_length, 
+                    sample_rate
+                )
+                
+                # Convert to numpy array
+                phoneme_midi = np.array([midi for _, midi in phoneme_midi_tuples])
+                
+                print(f"Estimated MIDI notes for {len(phoneme_midi_tuples)} phonemes")
         else:
             print(f"Warning: No corresponding .wav file found for {file_path}")
         
+        # Generate bin filename
+        base_filename = os.path.splitext(os.path.basename(file_path))[0]
+        bin_path = os.path.join(bin_dir, f"{base_filename}.h5")
+        
         # Save to h5py binary file
-        save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec, f0)
+        save_to_h5py(
+            bin_path, 
+            phonemes, 
+            file_path, 
+            phone_map,
+            mel_spec, 
+            f0, 
+            midi_notes, 
+            phoneme_midi
+        )
     
     # Test reading the binary file and generate visualization
     test_read_h5py(bin_path, config)

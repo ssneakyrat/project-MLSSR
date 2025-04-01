@@ -22,8 +22,40 @@ def validate_dataset(config, log_dir='logs/validation', num_samples=4):
     """
     print("Validating dataset module...")
     
+    # Increase PIL's image size limit to handle larger images
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None  # Disable the DecompressionBomb warning
+    
+    # Create run directory with sequential numbering
+    import os
+    import glob
+    
+    # Find existing validation runs and determine the next number
+    existing_runs = glob.glob(os.path.join(log_dir, "validation_*"))
+    if existing_runs:
+        # Extract run numbers from folder names
+        run_numbers = []
+        for run_path in existing_runs:
+            try:
+                run_name = os.path.basename(run_path)
+                run_num = int(run_name.split('_')[1])
+                run_numbers.append(run_num)
+            except (IndexError, ValueError):
+                continue
+        
+        # Get the next run number
+        next_num = max(run_numbers) + 1 if run_numbers else 0
+    else:
+        next_num = 0
+    
+    # Create the new run directory
+    run_dir = os.path.join(log_dir, f"validation_{next_num}")
+    os.makedirs(run_dir, exist_ok=True)
+    
     # Create TensorBoard writer
-    writer = SummaryWriter(log_dir)
+    writer = SummaryWriter(run_dir)
+    
+    print(f"Creating new TensorBoard run at: {run_dir}")
     
     # Load dataset
     data_items = load_dataset(split='train', shuffle=True)
@@ -102,7 +134,7 @@ def validate_dataset(config, log_dir='logs/validation', num_samples=4):
         except Exception as e:
             print(f"  Error generating visualization: {e}")
     
-    # Add images to TensorBoard individually but with organized tags
+    # Add images to TensorBoard individually with organized tags
     if all_images:
         try:
             # Add a summary text
@@ -110,28 +142,12 @@ def validate_dataset(config, log_dir='logs/validation', num_samples=4):
                           f"Dataset samples visualization ({len(all_images)} samples)", 
                           global_step=0)
             
-            # Resize images to a reasonable resolution
-            TARGET_HEIGHT = 600
-            
-            # Add each image with a consistent tag structure
+            # Add each image individually - no resizing to keep full resolution
             for i, (img_tensor, label) in enumerate(zip(all_images, image_labels)):
-                # Convert tensor to PIL image for resizing
-                img = Image.fromarray(img_tensor.permute(1, 2, 0).numpy().astype(np.uint8))
-                
-                # Maintain aspect ratio while resizing
-                width, height = img.size
-                new_width = int((TARGET_HEIGHT / height) * width)
-                img_resized = img.resize((new_width, TARGET_HEIGHT), Image.LANCZOS)
-                
-                # Convert back to tensor
-                img_tensor_resized = torch.from_numpy(
-                    np.array(img_resized).transpose((2, 0, 1))
-                )
-                
                 # Add individual image with numbered prefix for ordering
                 writer.add_image(
                     f'Validation Dataset Images/{i+1:02d}_{label}',
-                    img_tensor_resized, 
+                    img_tensor, 
                     global_step=0,  # Use 0 to avoid slider
                     dataformats='CHW'
                 )
@@ -150,7 +166,7 @@ def validate_dataset(config, log_dir='logs/validation', num_samples=4):
     writer.add_text("Validation Info", f"Visualized {samples_to_visualize} random samples")
     
     writer.close()
-    print(f"Validation complete. Results saved to {log_dir}")
+    print(f"Validation complete. Results saved to {run_dir}")
     print(f"To view visualizations, run: tensorboard --logdir={log_dir}")
 
 def main():

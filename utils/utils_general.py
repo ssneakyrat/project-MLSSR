@@ -42,7 +42,8 @@ def get_note_name(midi_number):
 def plot_alignment(mel_spec, f0, phonemes, output_path=None, config=None, time_scale=None, 
                   phoneme_midi=None, midi_notes=None, return_bytes=False):
     """
-    Generate a visualization showing the alignment between phonemes, audio features, and MIDI notes.
+    Generate a visualization showing the alignment between phonemes, audio features, and MIDI notes,
+    with the mel spectrogram as a separate plot.
     
     Args:
         mel_spec (numpy.ndarray): Mel spectrogram with shape (n_mels, time)
@@ -111,18 +112,22 @@ def plot_alignment(mel_spec, f0, phonemes, output_path=None, config=None, time_s
             # Default to HTK format if no phonemes
             time_scale = 1e-7
     
-    # Determine number of subplots based on available data
-    n_plots = 3  # Mel, F0, Phonemes
-    if midi_notes is not None:
-        n_plots += 1  # Add MIDI plot
+    # Create a figure with two subplots - cut size in half but increase element sizes
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(3, 2), sharex=True, 
+                                  gridspec_kw={'height_ratios': [2, 3]})
+                                  
+    # Set font sizes larger for better readability in small image
+    plt.rcParams.update({
+        'font.size': 4,
+        'axes.titlesize': 5,
+        'axes.labelsize': 4,
+        'xtick.labelsize': 3,
+        'ytick.labelsize': 3,
+        'legend.fontsize': 3,
+        'figure.titlesize': 6
+    })
     
-    # Create a figure with appropriate subplots
-    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 3 * n_plots), 
-                           sharex=True, 
-                           gridspec_kw={'height_ratios': [3] + [1] * (n_plots - 1)})
-    
-    # First layer: Mel spectrogram
-    ax1 = axes[0]
+    # Plot the mel spectrogram (without colorbar) - with increased visibility
     img = librosa.display.specshow(
         mel_spec, 
         x_axis='time',
@@ -131,34 +136,38 @@ def plot_alignment(mel_spec, f0, phonemes, output_path=None, config=None, time_s
         hop_length=hop_length,
         fmin=fmin,
         fmax=fmax,
-        ax=ax1
+        ax=ax1,
+        cmap='viridis'
     )
-    ax1.set_title('Mel Spectrogram')
-    ax1.grid(axis='x', color='white', linestyle='--', linewidth=0.5, alpha=0.5)
     
-    # Second layer: F0 contour
-    ax2 = axes[1]
-    ax2.plot(f0_times, f0, color='b')
-    ax2.set_ylabel('F0 (Hz)')
-    ax2.set_title('Fundamental Frequency (F0)')
-    ax2.set_ylim(f0_min - 10, f0_max + 10)
-    ax2.grid(axis='x', linestyle='--', linewidth=0.5, alpha=0.5)
+    # Title for the mel spectrogram with increased size
+    ax1.set_title('Mel Spectrogram', fontsize=5)
     
-    # Get MIDI times if available
-    if midi_notes is not None:
-        midi_times = f0_times  # Same time scale as F0
+    # Title for the mel spectrogram
+    ax1.set_title('Mel Spectrogram', fontsize=16)
     
-    # Third layer: Phoneme alignment
-    ax3 = axes[2]
-    ax3.set_ylim(0, 1)
-    ax3.set_title('Phoneme Alignment')
-    ax3.grid(axis='x', linestyle='--', linewidth=0.5, alpha=0.5)
-    ax3.set_yticks([])  # No y-ticks for phoneme display
+    # ===================
+    # Plot 2: F0, MIDI, and Phoneme Alignment
+    # ===================
+    
+    # Plot F0 contour with thicker line
+    ax2.plot(f0_times, f0, color='red', linewidth=0.8, label='F0')
+    ax2.set_ylabel('F0 (Hz)', color='red', fontsize=4)
+    ax2.tick_params(axis='y', labelcolor='red', labelsize=3)
+    ax2.set_ylim(f0_min, f0_max)
     
     # Generate a color map for phonemes
     unique_phonemes = sorted(set(phone for _, _, phone in phonemes))
     cmap = plt.cm.get_cmap('tab20', len(unique_phonemes))
     phoneme_colors = {phone: cmap(i) for i, phone in enumerate(unique_phonemes)}
+    
+    # Add phoneme segments as rectangles at the bottom of the second plot
+    y_min, y_max = ax2.get_ylim()
+    rect_height = (y_max - y_min) * 0.1  # Height for phoneme rectangles
+    rect_bottom = y_min  # Position at the bottom of the plot
+    
+    # Draw a line to separate the phoneme area
+    ax2.axhline(y=rect_bottom + rect_height, color='black', linestyle='-', alpha=0.5, linewidth=0.3)
     
     # Plot phoneme segments
     for start, end, phone in phonemes:
@@ -174,106 +183,119 @@ def plot_alignment(mel_spec, f0, phonemes, output_path=None, config=None, time_s
         
         # Draw a colored rectangle for the phoneme segment
         rect = plt.Rectangle(
-            (start_sec, 0.2), end_sec - start_sec, 0.6, 
-            facecolor=phoneme_colors[phone], alpha=0.7, edgecolor='black', linewidth=0.5
+            (start_sec, rect_bottom), end_sec - start_sec, rect_height, 
+            facecolor=phoneme_colors[phone], alpha=0.7, edgecolor='black', linewidth=0.2
         )
-        ax3.add_patch(rect)
+        ax2.add_patch(rect)
         
         # Add phoneme label at the center of the segment if wide enough
         center = (start_sec + end_sec) / 2
         width = end_sec - start_sec
         
         # Only add text if the segment is wide enough
-        if width > audio_duration / 100:  # Skip very narrow segments
-            ax3.text(center, 0.5, phone, 
-                    horizontalalignment='center', verticalalignment='center',
-                    color='black', fontsize=8, fontweight='bold')
+        if width > audio_duration / 50:  # Stricter threshold for small image
+            ax2.text(center, rect_bottom + rect_height/2, phone, 
+                   horizontalalignment='center', verticalalignment='center',
+                   color='black', fontsize=2, fontweight='bold')
     
-    # Create a legend for phonemes (only if not too many)
-    if len(unique_phonemes) <= 20:
-        legend_elements = [plt.Rectangle((0,0),1,1, color=phoneme_colors[p], label=p) 
-                         for p in unique_phonemes]
-        ax3.legend(handles=legend_elements, loc='upper center', 
-                 bbox_to_anchor=(0.5, -0.15), ncol=min(10, len(unique_phonemes)), 
-                 fontsize=8, frameon=True)
-    
-    # Fourth layer (if available): MIDI notes
+    # Add MIDI notes to the second subplot if available - with thinner lines
     if midi_notes is not None:
-        ax4 = axes[3]
-        
-        # Plot frame-level MIDI notes (if available)
-        if midi_notes is not None:
-            # Get the valid range of MIDI notes (exclude zeros)
-            midi_valid = midi_notes[midi_notes > 0]
-            y_min = max(0, np.floor(np.min(midi_valid) - 3)) if len(midi_valid) > 0 else 36
-            y_max = np.ceil(np.max(midi_valid) + 3) if len(midi_valid) > 0 else 84
+        # Get valid MIDI notes
+        midi_valid = midi_notes[midi_notes > 0]
+        if len(midi_valid) > 0:
+            midi_min = np.floor(np.min(midi_valid) - 3)
+            midi_max = np.ceil(np.max(midi_valid) + 3)
             
-            # Plot the MIDI notes
-            ax4.plot(midi_times, midi_notes, color='purple', linewidth=1.5)
-            ax4.set_ylabel('MIDI Note')
-            ax4.set_title('MIDI Notes')
-            ax4.set_ylim(y_min, y_max)
+            # Create a secondary y-axis for MIDI notes
+            ax3 = ax2.twinx()
+            ax3.plot(f0_times, midi_notes, color='purple', linewidth=0.6, alpha=0.7, label='MIDI')
+            ax3.set_ylabel('MIDI Note', color='purple', fontsize=4)
+            ax3.tick_params(axis='y', labelcolor='purple', labelsize=3)
+            ax3.set_ylim(midi_min, midi_max)
             
-            # Add grid lines at each MIDI note
-            for i in range(int(y_min), int(y_max) + 1):
-                ax4.axhline(y=i, color='lightgray', linestyle='-', alpha=0.5, linewidth=0.5)
+            # Add horizontal grid lines at octave intervals
+            for i in range(int(midi_min), int(midi_max) + 1, 12):  # Every octave (C notes)
+                ax3.axhline(y=i, color='purple', linestyle='--', alpha=0.3, linewidth=0.2)
+                ax3.text(audio_duration * 1.01, i, get_note_name(i), 
+                       color='purple', fontsize=2, verticalalignment='center')
             
-            # Label some of the MIDI note lines with note names
-            note_labels = []
-            for i in range(int(y_min), int(y_max) + 1):
-                if i % 12 == 0:  # Label C notes
-                    note_labels.append(i)
-                    ax4.text(-0.01, i, get_note_name(i), 
-                             horizontalalignment='right', verticalalignment='center',
-                             fontsize=8, transform=ax4.get_yaxis_transform())
-        
-        # Plot phoneme-level MIDI notes (if available)
-        if phoneme_midi is not None:
-            for start, end, phone, midi in phoneme_midi:
-                if midi <= 0:  # Skip unvoiced phonemes
-                    continue
+            # Plot phoneme MIDI notes
+            if phoneme_midi is not None:
+                for start, end, phone, midi in phoneme_midi:
+                    if midi <= 0:  # Skip unvoiced phonemes
+                        continue
+                        
+                    start_sec = start * time_scale
+                    end_sec = end * time_scale
                     
-                start_sec = start * time_scale
-                end_sec = end * time_scale
-                
-                # Skip segments outside the audio range
-                if start_sec > audio_duration:
-                    continue
+                    # Skip segments outside the audio range
+                    if start_sec > audio_duration:
+                        continue
+                        
+                    # Clip end time to the audio range
+                    end_sec = min(end_sec, audio_duration)
                     
-                # Clip end time to the audio range
-                end_sec = min(end_sec, audio_duration)
-                
-                # Draw a horizontal line for the MIDI note
-                ax4.plot([start_sec, end_sec], [midi, midi], 
-                         color='red', linewidth=3, alpha=0.7)
-                
-                # Add note name at the center of the segment if wide enough
-                center = (start_sec + end_sec) / 2
-                width = end_sec - start_sec
-                
-                # Only add text if the segment is wide enough
-                if width > audio_duration / 50:  # Skip very narrow segments
-                    note_name = get_note_name(int(round(midi)))
-                    ax4.text(center, midi + 0.5, note_name,
-                             horizontalalignment='center', verticalalignment='bottom',
-                             color='darkred', fontsize=8, fontweight='bold')
-        
-        ax4.grid(axis='x', linestyle='--', linewidth=0.5, alpha=0.5)
+                    # Draw a horizontal line for the MIDI note
+                    ax3.plot([start_sec, end_sec], [midi, midi], 
+                           color='yellow', linewidth=0.8, alpha=0.7)
+                    
+                    # Add note name at the center of the segment if wide enough
+                    center = (start_sec + end_sec) / 2
+                    width = end_sec - start_sec
+                    
+                    # Only add text if the segment is wide enough
+                    if width > audio_duration / 25:  # Stricter threshold for small image
+                        note_name = get_note_name(int(round(midi)))
+                        ax3.text(center, midi + 0.5, note_name,
+                               horizontalalignment='center', verticalalignment='bottom',
+                               color='yellow', fontsize=2, fontweight='bold', 
+                               bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=0.5))
     
-    # Set the x-axis limits
+    # Create legends for the second subplot with smaller size
+    # Phoneme legend - show fewer examples for better readability
+    if len(unique_phonemes) <= 10:  # Limit to fewer phonemes for small plot
+        max_legend_phonemes = min(6, len(unique_phonemes))  # At most 6 phonemes in legend
+        # Take a sample of phonemes if there are too many
+        legend_phonemes = unique_phonemes[:max_legend_phonemes]
+        
+        phoneme_patches = [plt.Rectangle((0,0), 1, 1, facecolor=phoneme_colors[p], alpha=0.7, 
+                                        edgecolor='black', label=p) 
+                         for p in legend_phonemes]
+        phoneme_legend = ax2.legend(handles=phoneme_patches, loc='lower center',
+                                  bbox_to_anchor=(0.5, -0.3), ncol=min(3, max_legend_phonemes),
+                                  fontsize=2, frameon=True, title='Phonemes', title_fontsize=3)
+        
+        # Add the legend to the figure
+        fig.add_artist(phoneme_legend)
+    
+    # F0 and MIDI legend - with smaller size
+    line_legends = [plt.Line2D([0], [0], color='red', lw=0.8, label='F0')]
+    if midi_notes is not None and len(midi_valid) > 0:
+        line_legends.append(plt.Line2D([0], [0], color='purple', lw=0.6, label='MIDI'))
+        line_legends.append(plt.Line2D([0], [0], color='yellow', lw=0.8, label='Ph-MIDI'))
+        
+    ax2.legend(handles=line_legends, loc='upper right', fontsize=2, frameon=True)
+    
+    # Title for the alignment plot
+    ax2.set_title('F0, MIDI Notes, and Phoneme Alignment', fontsize=5)
+    
+    # Add grid for the second subplot
+    ax2.grid(True, axis='x', alpha=0.3)
+    
+    # Set x-axis limits
     plt.xlim(0, audio_duration)
-    plt.xlabel('Time (s)')
+    plt.xlabel('Time (s)', fontsize=4)
     
-    # Add title
-    plt.suptitle("Audio Features, Phoneme Alignment, and MIDI Notes", fontsize=16)
+    # Add overall title
+    fig.suptitle("Audio Features and Phoneme Alignment", fontsize=6)
     
-    # Adjust layout
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    # Adjust layout with very tight spacing
+    plt.tight_layout(rect=[0, 0, 1, 0.96], pad=0.1, h_pad=0.5, w_pad=0.1)
     
     if return_bytes:
         # Save to in-memory buffer instead of file
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+        plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
         plt.close(fig)
         buf.seek(0)
         

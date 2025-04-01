@@ -39,8 +39,8 @@ def get_note_name(midi_number):
     note = note_names[midi_number % 12]
     return f"{note}{octave}"
 
-def plot_alignment(mel_spec, f0, phonemes, output_path, config=None, time_scale=None, 
-                  phoneme_midi=None, midi_notes=None):
+def plot_alignment(mel_spec, f0, phonemes, output_path=None, config=None, time_scale=None, 
+                  phoneme_midi=None, midi_notes=None, return_bytes=False):
     """
     Generate a visualization showing the alignment between phonemes, audio features, and MIDI notes.
     
@@ -48,19 +48,32 @@ def plot_alignment(mel_spec, f0, phonemes, output_path, config=None, time_scale=
         mel_spec (numpy.ndarray): Mel spectrogram with shape (n_mels, time)
         f0 (numpy.ndarray): F0 contour with shape (time,)
         phonemes (list): List of phoneme tuples (start_time, end_time, phoneme)
-        output_path (str): Path to save the visualization
+        output_path (str, optional): Path to save the visualization. Not used if return_bytes=True.
         config (dict, optional): Configuration dictionary
         time_scale (float, optional): Scale factor to convert phoneme timings to seconds.
                                     If None, will attempt to auto-detect.
         phoneme_midi (list, optional): List of phoneme tuples with MIDI notes 
                                       (start_time, end_time, phoneme, midi_note)
         midi_notes (numpy.ndarray, optional): Frame-level MIDI note values
+        return_bytes (bool, optional): If True, return image bytes instead of saving to disk.
         
     Returns:
-        str: Path to the saved visualization file
+        str or bytes: Path to the saved visualization file or image bytes if return_bytes=True
     """
-    # Ensure the output directory exists
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    import matplotlib
+    if return_bytes:
+        # Use Agg backend when returning bytes (no GUI needed)
+        matplotlib.use('Agg')
+        
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import librosa
+    import librosa.display
+    import io
+    
+    # Ensure the output directory exists if saving to disk
+    if output_path and not return_bytes:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     # Default audio parameters if config is not provided
     sample_rate = config.get('audio', {}).get('sample_rate', 22050) if config else 22050
@@ -257,10 +270,19 @@ def plot_alignment(mel_spec, f0, phonemes, output_path, config=None, time_scale=
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     
-    # Save the figure
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    
-    print(f"Alignment visualization saved to {output_path}")
-    
-    return output_path
+    if return_bytes:
+        # Save to in-memory buffer instead of file
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
+        
+        print("Plot generated as bytes")
+        return buf.getvalue()
+    else:
+        # Save to file
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        print(f"Alignment visualization saved to {output_path}")
+        return output_path

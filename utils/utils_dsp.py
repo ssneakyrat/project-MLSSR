@@ -33,7 +33,7 @@ def extract_mel_spectrogram(wav_path, config):
         # Convert to log scale (dB)
         mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
         
-        print(f"Extracted mel spectrogram with shape: {mel_spec.shape}")
+        #print(f"Extracted mel spectrogram with shape: {mel_spec.shape}")
         return mel_spec
         
     except Exception as e:

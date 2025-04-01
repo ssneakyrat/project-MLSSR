@@ -2,10 +2,9 @@ import os
 import glob
 import h5py
 import numpy as np
-import yaml
 
-from utils.utils_general import load_config
-from utils.utils_dsp import extract_mel_spectrogram
+from utils.utils_general import load_config, plot_alignment
+from utils.utils_dsp import extract_mel_spectrogram, extract_f0
 
 def test_read_h5py(bin_path, config):
     """
@@ -67,13 +66,19 @@ def test_read_h5py(bin_path, config):
                 
                 # Get base filename without extension
                 base_filename = os.path.splitext(os.path.basename(bin_path))[0]
-                plot_path = os.path.join(plots_dir, f"{base_filename}_visualization.png")
                 
-                # Import the plotting function from utils_dsp
-                from utils.utils_dsp import plot_mel_and_f0
+                # Create phoneme tuples for alignment visualization
+                phoneme_tuples = []
+                for i in range(len(phone_texts)):
+                    phoneme_tuples.append((phone_starts[i], phone_ends[i], phone_texts[i]))
                 
-                # Plot and save
-                plot_mel_and_f0(mel_spec, f0, plot_path)
+                # Import the alignment plotting function
+                from utils.utils_general import plot_alignment
+                
+                # Generate and save the alignment visualization
+                alignment_plot_path = os.path.join(plots_dir, f"{base_filename}_alignment.png")
+                plot_alignment(mel_spec, f0, phoneme_tuples, alignment_plot_path, config)
+                
     except Exception as e:
         print(f"Error reading h5py file: {e}")
         
@@ -310,9 +315,9 @@ def main():
         
         # Save to h5py binary file
         save_to_h5py(bin_path, phonemes, file_path, phone_map, mel_spec, f0)
-        
-        # Test reading the binary file and generate visualization
-        test_read_h5py(bin_path, config)
+    
+    # Test reading the binary file and generate visualization
+    test_read_h5py(bin_path, config)
 
 if __name__ == "__main__":
     main()

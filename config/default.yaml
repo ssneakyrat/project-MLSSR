@@ -1,0 +1,4 @@
+data:
+  raw_dir: datasets/gin
+  bin_dir: datasets/gin/bin
+  phone_map: []

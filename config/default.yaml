@@ -49,7 +49,7 @@ train:
   validation_split: 0.1
   log_interval: 10
   save_interval: 10
-  save_dir: runs/unet
+  save_dir: logs/unet
   
   # Hardware
   num_workers: 4

@@ -59,29 +59,29 @@ def main():
         name='lightning_logs'
     )
     
-    # Define callbacks
+    # Create subdirectories for different types of checkpoints
+    periodic_checkpoint_dir = os.path.join(save_dir, 'periodic_checkpoints')
+    best_model_dir = os.path.join(save_dir, 'best_model')
+    os.makedirs(periodic_checkpoint_dir, exist_ok=True)
+    os.makedirs(best_model_dir, exist_ok=True)
+
+    # Define callbacks with separate directories for each ModelCheckpoint
     callbacks = [
-        # Save best model based on validation loss
+        # Save periodic checkpoints based on validation loss
         ModelCheckpoint(
             monitor='val_loss',
             filename='unet-{epoch:02d}-{val_loss:.6f}',
             save_top_k=3,
             mode='min',
             save_last=True,
-        ),
-        # Save best model overall
-        ModelCheckpoint(
-            filename='unet-best',
-            save_top_k=1,
-            monitor='val_loss',
-            mode='min',
+            dirpath=periodic_checkpoint_dir,
         ),
         # Monitor learning rate
         LearningRateMonitor(logging_interval='epoch'),
         # Early stopping
         EarlyStopping(
             monitor='val_loss',
-            patience=config['train'].get('lr_patience', 5) * 2,  # Double the LR patience
+            patience=config['train'].get('lr_patience', 5) * 2,
             mode='min',
             verbose=True
         ),

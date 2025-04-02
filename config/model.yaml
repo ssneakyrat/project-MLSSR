@@ -1,11 +1,11 @@
-# Model configuration for U-Net mel spectrogram reconstruction with Dual-Path processing
+# Model configuration for Multi-Band U-Net mel spectrogram reconstruction
 data:
   bin_dir: datasets
   bin_file: mel_spectrograms.h5
   data_key: mel_spectrograms
   lazy_load: true
   raw_dir: datasets/gin
-  max_samples: 10
+  max_samples: 100
   sample_percentage: null
   
 audio:
@@ -27,6 +27,10 @@ model:
   encoder_channels: [16, 32, 64, 128]
   bottleneck_channels: 256
   decoder_channels: [64, 32, 16, 1]
+  
+  # Multi-band processing configuration
+  num_freq_bands: 4        # Number of frequency bands to process separately
+  band_overlap: 0.1        # Overlap ratio between bands (0.1 = 10% overlap)
   
   nl_blocks:
     use_nl_blocks: true
@@ -51,7 +55,7 @@ model:
   loss_beta: 0.2
 
 train:
-  batch_size: 1
+  batch_size: 16            # Increased from 1 for better stability
   num_epochs: 1000
   learning_rate: 0.001
   weight_decay: 0.0001
@@ -60,10 +64,10 @@ train:
   lr_factor: 0.8
   validation_split: 0.1
   log_interval: 100
-  save_dir: logs/unet_model
+  save_dir: logs/multiband_model
   num_workers: 4
   pin_memory: true
   
 validation:
-  val_every_epoch: 10
-  max_samples: 4
+  val_every_epoch: 10       # Log validation images every 5 epochs
+  max_samples: 4           # Number of samples to visualize

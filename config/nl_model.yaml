@@ -50,6 +50,9 @@ model:
     nl_reduction_ratio: 1     # Channel reduction ratio for efficiency
     nl_use_sub_sample: false   # Whether to use sub-sampling in NL blocks
   
+  # attention head
+  attention_head: 4
+
   # Loss function weights
   loss_alpha: 0.8  # Weight for L1 loss
   loss_beta: 0.2   # Weight for Spectral Convergence loss

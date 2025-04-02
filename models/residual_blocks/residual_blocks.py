@@ -149,45 +149,64 @@ class DecoderBlockResidual(nn.Module):
 
 class SelfAttention(nn.Module):
     """
-    Self-Attention module for feature refinement.
+    Multi-head Self-Attention module for feature refinement.
     
-    Applies self-attention to the input tensor, allowing the model to focus
-    on important regions and capture long-range dependencies.
+    Applies multi-head self-attention to the input tensor, allowing the model 
+    to focus on important regions and capture different aspects of long-range 
+    dependencies. This is particularly useful for homogeneous background features.
     """
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, num_heads=4):
         super(SelfAttention, self).__init__()
-        self.query = nn.Conv2d(in_channels, in_channels//8, 1)
-        self.key = nn.Conv2d(in_channels, in_channels//8, 1)
-        self.value = nn.Conv2d(in_channels, in_channels, 1)
+        self.num_heads = num_heads
+        self.head_dim = in_channels // num_heads
+        
+        # Ensure the input channels can be evenly divided by num_heads
+        assert in_channels % num_heads == 0, "in_channels must be divisible by num_heads"
+        
+        # Linear projections for each head
+        self.query_proj = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.key_proj = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.value_proj = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        
+        # Output projection
+        self.output_proj = nn.Conv2d(in_channels, in_channels, kernel_size=1)
         self.gamma = nn.Parameter(torch.zeros(1))
         
     def forward(self, x):
-        batch_size, C, width, height = x.size()
+        batch_size, C, H, W = x.size()
         
-        # Reshape for matrix multiplication
-        proj_query = self.query(x).view(batch_size, -1, width*height).permute(0, 2, 1)
-        proj_key = self.key(x).view(batch_size, -1, width*height)
+        # Project and reshape for multi-head attention
+        query = self.query_proj(x).view(batch_size, self.num_heads, self.head_dim, -1)
+        key = self.key_proj(x).view(batch_size, self.num_heads, self.head_dim, -1)
+        value = self.value_proj(x).view(batch_size, self.num_heads, self.head_dim, -1)
         
-        # Attention map
-        attention = F.softmax(torch.bmm(proj_query, proj_key), dim=-1)
+        # Transpose query for matrix multiplication
+        query = query.permute(0, 1, 3, 2)
         
-        proj_value = self.value(x).view(batch_size, -1, width*height)
-        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
-        out = out.view(batch_size, C, width, height)
+        # Calculate attention scores for each head
+        attention = torch.matmul(query, key)
+        attention = F.softmax(attention, dim=-1)
         
-        # Residual connection with learnable weight
+        # Apply attention to values
+        out = torch.matmul(attention, value.permute(0, 1, 3, 2))
+        
+        # Reshape and project back to original dimensions
+        out = out.permute(0, 1, 3, 2).contiguous().view(batch_size, C, H, W)
+        out = self.output_proj(out)
+        
+        # Apply weighted residual connection
         return self.gamma * out + x
 
 
 class DilatedBottleneck(nn.Module):
     """
-    Enhanced bottleneck block with dilated convolutions and self-attention.
+    Enhanced bottleneck block with dilated convolutions and multi-head self-attention.
     
     Uses parallel dilated convolutions with different dilation rates to increase
     the receptive field without increasing the number of parameters, followed by
-    self-attention to capture long-range dependencies.
+    multi-head self-attention to capture long-range dependencies.
     """
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, num_attention_heads=4):
         super(DilatedBottleneck, self).__init__()
         # Initial convolution
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
@@ -204,8 +223,8 @@ class DilatedBottleneck(nn.Module):
         self.conv_out = nn.Conv2d(out_channels, in_channels, kernel_size=1)
         self.bn_out = nn.BatchNorm2d(in_channels)
         
-        # Add self-attention module
-        self.attention = SelfAttention(in_channels)
+        # Add multi-head self-attention module
+        self.attention = SelfAttention(in_channels, num_heads=num_attention_heads)
         
     def forward(self, x):
         # Store input for residual connection
@@ -230,7 +249,7 @@ class DilatedBottleneck(nn.Module):
         # Apply residual connection
         out = F.relu(out + residual)
         
-        # Apply self-attention for global context modeling
+        # Apply multi-head self-attention for global context modeling
         out = self.attention(out)
         
         return out

@@ -138,7 +138,7 @@ class UNetResidualNLSE(pl.LightningModule):
                 )
         
         # Bottleneck - Use the DilatedBottleneck with attention
-        self.bottleneck = DilatedBottleneck(self.encoder_channels[-1], self.bottleneck_channels)
+        self.bottleneck = DilatedBottleneck(self.encoder_channels[-1], self.bottleneck_channels, config['model'].get('attention_head', 4))
         
         # Add Non-Local Block to the bottleneck if specified
         if self.nl_blocks_config.get('use_nl_blocks', True) and self.nl_blocks_config.get('nl_in_bottleneck', True):

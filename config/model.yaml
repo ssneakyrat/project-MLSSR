@@ -1,0 +1,79 @@
+# Model configuration for Multi-Band U-Net mel spectrogram reconstruction
+data:
+  bin_dir: datasets
+  bin_file: mel_spectrograms.h5
+  data_key: mel_spectrograms
+  lazy_load: true
+  raw_dir: datasets/gin
+  max_samples: 100
+  sample_percentage: null
+  
+audio:
+  sample_rate: 22050
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+  n_mels: 80
+  fmin: 0
+  fmax: 8000
+  f0_min: 50
+  f0_max: 600
+
+model:
+  time_frames: 128
+  mel_bins: 80
+  scale_factor: 1
+  layer_count: 4
+  encoder_channels: [16, 32, 64, 128]
+  bottleneck_channels: 256
+  decoder_channels: [64, 32, 16, 1]
+  
+  # Multi-band processing configuration
+  num_freq_bands: 4        # Number of frequency bands to process separately
+  band_overlap: 0.1        # Overlap ratio between bands (0.1 = 10% overlap)
+  
+  nl_blocks:
+    use_nl_blocks: true
+    nl_in_bottleneck: true
+    nl_mode: "embedded"
+    nl_encoder_layers: [-1]
+    nl_decoder_layers: [0]
+    nl_reduction_ratio: 2
+  
+  dual_path:
+    use_dual_path: true
+    dual_path_encoder_layers: [-2, -1]
+    dual_path_decoder_layers: [0, 1]
+
+  low_freq_emphasis:
+    use_lfe: true
+    lfe_encoder_layers: "all"
+    lfe_reduction_ratio: 8
+
+  attention_head: 4
+  loss_alpha: 0.8
+  loss_beta: 0.2
+
+train:
+  batch_size: 16            # Increased from 1 for better stability
+  num_epochs: 1000
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  lr_scheduler: reduce_on_plateau
+  lr_patience: 10
+  lr_factor: 0.8
+  validation_split: 0.1
+  log_interval: 100
+  save_dir: logs/multiband_model
+  num_workers: 4
+  pin_memory: true
+  
+validation:
+  val_every_epoch: 10       # Log validation images every 5 epochs
+  max_samples: 4           # Number of samples to visualize
+  
+  logging:
+    full_spectrum: true     # Log full spectrum input/output
+    individual_bands: false  # Log individual frequency band visualizations
+    merged_outputs: false    # Log band-merged and fused outputs
+    error_analysis: false    # Log frequency-band error analysis

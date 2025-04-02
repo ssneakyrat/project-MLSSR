@@ -3,156 +3,35 @@ import glob
 import h5py
 import numpy as np
 from tqdm import tqdm
+import argparse
 import logging
 
-from utils.utils_general import load_config, plot_alignment
-from utils.utils_dsp import extract_mel_spectrogram, extract_f0, f0_to_midi, estimate_phoneme_midi_notes
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s: %(message)s'
+from utils.utils import (
+    load_config, 
+    extract_mel_spectrogram, 
+    extract_f0, 
+    normalize_mel_spectrogram, 
+    pad_or_truncate_mel
 )
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger('preprocess')
 
-def test_read_h5py(bin_path, config):
-    """
-    Test reading from an h5py binary file, print its contents, and generate visualization.
-    
-    Args:
-        bin_path (str): Path to the binary file
-        config (dict): Configuration dictionary
-    """
-    logger.info(f"Testing read from {bin_path}")
-    try:
-        with h5py.File(bin_path, 'r') as f:
-            # Get key information
-            root_keys = list(f.keys())
-            
-            # Get the phone map at root level
-            phone_map = f['PHONE_MAP'][:]
-            
-            # Get data from the data group
-            data_group = f['data']
-            
-            # Get all file IDs
-            file_ids = list(data_group.keys())
-            
-            # Print summary information
-            logger.info(f"Root level keys: {root_keys}")
-            logger.info(f"Phone map: {[p.decode('utf-8') if isinstance(p, bytes) else p for p in phone_map]}")
-            logger.info(f"Number of files in dataset: {len(file_ids)}")
-            
-            # Select a random file to visualize
-            if file_ids:
-                import random
-                file_id = random.choice(file_ids)
-                logger.info(f"Visualizing random file: {file_id}")
-                
-                file_group = data_group[file_id]
-                
-                # Get the data for the selected file
-                phone_starts = file_group['PHONE_START'][:]
-                phone_ends = file_group['PHONE_END'][:]
-                phone_durations = file_group['PHONE_DURATION'][:]
-                phone_texts = file_group['PHONE_TEXT'][:]
-                file_name = file_group['FILE_NAME'][:]
-                total_duration = file_group['TOTAL_DURATION'][:]
-                
-                # Print file information
-                logger.info(f"FILE_NAME: {file_name[0]}")
-                logger.info(f"Number of phonemes: {len(phone_texts)}")
-                logger.info(f"Total duration: {total_duration[0]}")
-                
-                # Print first 5 entries
-                if len(phone_texts) > 0:
-                    logger.info("First 5 phoneme entries:")
-                    for i in range(min(5, len(phone_texts))):
-                        logger.info(f"  {phone_texts[i]}: start={phone_starts[i]}, end={phone_ends[i]}, duration={phone_durations[i]}")
-                
-                # Check if mel spectrogram, F0, and MIDI_NOTES are present
-                mel_spec = None
-                f0 = None
-                midi_notes = None
-                
-                if 'MEL_SPEC' in file_group:
-                    mel_spec = file_group['MEL_SPEC'][:]
-                    logger.info(f"MEL_SPEC shape: {mel_spec.shape}")
-                    
-                if 'F0' in file_group:
-                    f0 = file_group['F0'][:]
-                    logger.info(f"F0 shape: {f0.shape}")
-                    
-                if 'MIDI_NOTES' in file_group:
-                    midi_notes = file_group['MIDI_NOTES'][:]
-                    logger.info(f"MIDI_NOTES shape: {midi_notes.shape}")
-                    
-                if 'PHONEME_MIDI' in file_group:
-                    phoneme_midi = file_group['PHONEME_MIDI'][:]
-                    if len(phoneme_midi) > 0:
-                        logger.info(f"PHONEME_MIDI (first 5 entries):")
-                        for i in range(min(5, len(phoneme_midi))):
-                            logger.info(f"  {phone_texts[i]}: MIDI note = {phoneme_midi[i]}")
-                    
-                # Generate visualization if both mel and F0 are available
-                if mel_spec is not None and f0 is not None:
-                    # Create plots directory if it doesn't exist
-                    plots_dir = config.get('audio', {}).get('plots_dir', 'plots')
-                    os.makedirs(plots_dir, exist_ok=True)
-                    
-                    # Create phoneme tuples for alignment visualization
-                    phoneme_tuples = []
-                    phoneme_midi_tuples = []
-                    for i in range(len(phone_texts)):
-                        phoneme_tuples.append((phone_starts[i], phone_ends[i], phone_texts[i]))
-                        if 'PHONEME_MIDI' in file_group:
-                            phoneme_midi_tuples.append((phone_starts[i], phone_ends[i], phone_texts[i], phoneme_midi[i]))
-                        else:
-                            phoneme_midi_tuples = None
-                    
-                    # Generate and save the alignment visualization
-                    alignment_plot_path = os.path.join(plots_dir, f"{file_id}_alignment.png")
-                    logger.info(f"Generating visualization: {alignment_plot_path}")
-                    plot_alignment(
-                        mel_spec, 
-                        f0, 
-                        phoneme_tuples, 
-                        alignment_plot_path, 
-                        config, 
-                        phoneme_midi=phoneme_midi_tuples,
-                        midi_notes=midi_notes
-                    )
-                    logger.info(f"Visualization saved to {alignment_plot_path}")
-                
-    except Exception as e:
-        logger.error(f"Error reading h5py file: {e}")
-        
-def list_lab_files(raw_dir="raw_dir/lab"):
-    """
-    List all .lab files in the specified directory.
-    """
-    # Check if directory exists
+def list_lab_files(raw_dir):
     if not os.path.exists(raw_dir):
         logger.error(f"Error: {raw_dir} directory not found!")
         return []
     
-    # Get all .lab files in the directory
     files = glob.glob(f"{raw_dir}/**/*.lab", recursive=True)
-    
-    # Print summary
     logger.info(f"Found {len(files)} .lab files in {raw_dir} directory")
     
     return files
 
 def parse_lab_file(file_path):
-    """
-    Parse a .lab file containing phoneme timing data.
-    """
     phonemes = []
     try:
         with open(file_path, 'r') as f:
             for line in f:
-                # Split line into components
                 parts = line.strip().split()
                 if len(parts) >= 3:
                     start_time = int(parts[0])
@@ -165,267 +44,179 @@ def parse_lab_file(file_path):
     return phonemes
 
 def find_wav_file(lab_file_path, raw_dir):
-    """
-    Find the corresponding .wav file for a .lab file.
-    
-    Args:
-        lab_file_path (str): Path to the .lab file
-        raw_dir (str): Raw directory path
-        
-    Returns:
-        str: Path to the corresponding .wav file, or None if not found
-    """
-    # Get the base filename without extension
     base_filename = os.path.splitext(os.path.basename(lab_file_path))[0]
-    
-    # Get the directory of the lab file
     lab_dir = os.path.dirname(lab_file_path)
     
-    # Try to find wav file in parallel 'wav' directory
     wav_dir = lab_dir.replace('/lab/', '/wav/')
     if '/lab/' not in wav_dir:
         wav_dir = lab_dir.replace('\\lab\\', '\\wav\\')
     
     wav_file_path = os.path.join(wav_dir, f"{base_filename}.wav")
     
-    # Check if the wav file exists
     if os.path.exists(wav_file_path):
         return wav_file_path
     
-    # If not found, try to find it in the raw directory's wav folder
     wav_file_path = os.path.join(raw_dir, "wav", f"{base_filename}.wav")
     
     if os.path.exists(wav_file_path):
         return wav_file_path
     
-    logger.warning(f"Could not find corresponding .wav file for {lab_file_path}")
     return None
 
-def save_all_to_h5py(bin_path, file_data, phone_map):
-    """
-    Save all processed data to a single h5py binary file.
+def save_to_h5(output_path, file_data, phone_map, config, data_key='mel_spectrograms', target_shape=None):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    Args:
-        bin_path (str): Path to the binary file
-        file_data (dict): Dictionary containing processed data for each file
-        phone_map (list): List of unique phonemes
-    """
-    # Convert phone_map to numpy array with proper dtype
-    phone_map_array = np.array(phone_map, dtype=h5py.special_dtype(vlen=str))
+    if target_shape is None:
+        target_bins = config['model'].get('mel_bins', 80)
+        target_frames = config['model'].get('time_frames', 128)
+        target_shape = (target_bins, target_frames)
     
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(bin_path), exist_ok=True)
+    valid_items = 0
+    for file_info in file_data.values():
+        if 'MEL_SPEC' in file_info and file_info['MEL_SPEC'] is not None:
+            valid_items += 1
     
-    logger.info(f"Saving all data to single binary file: {bin_path}")
-    
-    # Create and save to h5py file
-    with h5py.File(bin_path, 'w') as f:
-        # Save the phone map at root level
-        f.create_dataset('PHONE_MAP', data=phone_map_array)
+    with h5py.File(output_path, 'w') as f:
+        phone_map_array = np.array(phone_map, dtype=h5py.special_dtype(vlen=str))
+        f.create_dataset('phone_map', data=phone_map_array)
         
-        # Create a data group for all files
-        data_group = f.create_group('data')
+        dataset = f.create_dataset(
+            data_key,
+            shape=(valid_items,) + target_shape,
+            dtype=np.float32,
+            chunks=(1,) + target_shape
+        )
         
-        # Save data for each file with progress bar
-        with tqdm(total=len(file_data), desc="Saving files to h5py", unit="file") as pbar:
+        file_ids = f.create_dataset(
+            'file_ids',
+            shape=(valid_items,),
+            dtype=h5py.special_dtype(vlen=str)
+        )
+        
+        dataset.attrs['sample_rate'] = config['audio']['sample_rate']
+        dataset.attrs['n_fft'] = config['audio']['n_fft']
+        dataset.attrs['hop_length'] = config['audio']['hop_length']
+        dataset.attrs['n_mels'] = config['audio']['n_mels']
+        
+        idx = 0
+        with tqdm(total=len(file_data), desc="Saving to H5", unit="file") as pbar:
             for file_id, file_info in file_data.items():
-                # Create a group for this file
-                file_group = data_group.create_group(file_id)
-                
-                # Save phoneme data
-                file_group.create_dataset('PHONE_START', data=file_info['PHONE_START'])
-                file_group.create_dataset('PHONE_END', data=file_info['PHONE_END'])
-                file_group.create_dataset('PHONE_DURATION', data=file_info['PHONE_DURATION'])
-                file_group.create_dataset('PHONE_TEXT', data=file_info['PHONE_TEXT'])
-                file_group.create_dataset('FILE_NAME', data=file_info['FILE_NAME'])
-                file_group.create_dataset('TOTAL_DURATION', data=file_info['TOTAL_DURATION'])
-                
-                # Save mel spectrogram if available
                 if 'MEL_SPEC' in file_info and file_info['MEL_SPEC'] is not None:
-                    file_group.create_dataset('MEL_SPEC', data=file_info['MEL_SPEC'])
+                    mel_spec = file_info['MEL_SPEC']
+                    mel_spec = normalize_mel_spectrogram(mel_spec)
+                    
+                    if mel_spec.shape != target_shape:
+                        mel_spec = pad_or_truncate_mel(mel_spec, target_shape[1], target_shape[0])
+                    
+                    dataset[idx] = mel_spec
+                    file_ids[idx] = file_id
+                    idx += 1
                 
-                # Save F0 if available
-                if 'F0' in file_info and file_info['F0'] is not None:
-                    file_group.create_dataset('F0', data=file_info['F0'])
-                
-                # Save MIDI notes if available
-                if 'MIDI_NOTES' in file_info and file_info['MIDI_NOTES'] is not None:
-                    file_group.create_dataset('MIDI_NOTES', data=file_info['MIDI_NOTES'])
-                
-                # Save phoneme MIDI notes if available
-                if 'PHONEME_MIDI' in file_info and file_info['PHONEME_MIDI'] is not None:
-                    file_group.create_dataset('PHONEME_MIDI', data=file_info['PHONEME_MIDI'])
-                
-                # Update progress bar
                 pbar.update(1)
     
-    logger.info(f"Saved data for {len(file_data)} files to {bin_path}")
+    logger.info(f"Saved {idx} mel spectrograms to {output_path}")
 
 def collect_unique_phonemes(lab_files):
-    """
-    Collect unique phonemes from all lab files.
-    
-    Args:
-        lab_files (list): List of lab file paths
-    
-    Returns:
-        list: List of unique phonemes
-    """
     unique_phonemes = set()
     
-    # Use progress bar for collecting phonemes
-    with tqdm(total=len(lab_files), desc="Collecting unique phonemes", unit="file") as pbar:
+    with tqdm(total=len(lab_files), desc="Collecting phonemes", unit="file") as pbar:
         for file_path in lab_files:
             phonemes = parse_lab_file(file_path)
             for _, _, phone in phonemes:
                 unique_phonemes.add(phone)
             pbar.update(1)
     
-    # Convert to sorted list for consistent indexing
     phone_map = sorted(list(unique_phonemes))
-    logger.info(f"Collected {len(phone_map)} unique phonemes: {phone_map}")
+    logger.info(f"Collected {len(phone_map)} unique phonemes")
     
     return phone_map
 
-def update_config_with_phone_map(config, phone_map, config_path="config/default.yaml"):
-    """
-    Update the configuration file with the phone map.
-    
-    Args:
-        config (dict): Configuration dictionary
-        phone_map (list): List of unique phonemes
-        config_path (str): Path to the configuration file
-    """
-    # Update the phone_map in the config
-    config['data']['phone_map'] = phone_map
-    logger.info("Updated configuration with phone map")
-
 def main():
-    """
-    Main function to process lab files and save all data to a single h5py file.
-    """
-    # Load configuration
-    config = load_config()
+    parser = argparse.ArgumentParser(description='Process lab files and save data to H5 file')
+    parser.add_argument('--config', type=str, default='config/default.yaml', help='Path to configuration file')
+    parser.add_argument('--raw_dir', type=str, help='Raw directory path (overrides config)')
+    parser.add_argument('--output', type=str, help='Path for the output H5 file (overrides config)')
+    parser.add_argument('--min_phonemes', type=int, default=5, help='Minimum phonemes required per file')
+    parser.add_argument('--data_key', type=str, default='mel_spectrograms', help='Key to use for data in the H5 file')
+    parser.add_argument('--target_length', type=int, default=None, help='Target time frames')
+    parser.add_argument('--target_bins', type=int, default=None, help='Target mel bins')
+    args = parser.parse_args()
     
-    # Get list of .lab files
+    config = load_config(args.config)
+    
+    if args.raw_dir:
+        config['data']['raw_dir'] = args.raw_dir
+    
     raw_dir = config['data']['raw_dir']
-    bin_dir = config['data']['bin_dir']
-    bin_file = config['data']['bin_file']
     
-    # Ensure bin directory exists
-    os.makedirs(bin_dir, exist_ok=True)
+    output_path = args.output
+    if output_path is None:
+        bin_dir = config['data']['bin_dir']
+        bin_file = config['data']['bin_file']
+        output_path = os.path.join(bin_dir, bin_file)
     
-    # Create plots directory if it doesn't exist
-    plots_dir = config.get('audio', {}).get('plots_dir', 'plots')
-    os.makedirs(plots_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    target_shape = None
+    if args.target_length is not None and args.target_bins is not None:
+        target_shape = (args.target_bins, args.target_length)
     
     lab_files = list_lab_files(raw_dir)
     
-    # Collect unique phonemes from all files
     phone_map = collect_unique_phonemes(lab_files)
+    config['data']['phone_map'] = phone_map
     
-    # Update the configuration with the phone map
-    update_config_with_phone_map(config, phone_map)
-    
-    # Dictionary to store all processed data
     all_file_data = {}
     
-    # Keep track of files skipped due to minimum phoneme requirement
-    min_phoneme_count = 5
+    min_phoneme_count = args.min_phonemes
     skipped_files_count = 0
     processed_files_count = 0
     
-    # Process each file with progress bar
-    logger.info("Processing lab files...")
     with tqdm(total=len(lab_files), desc="Processing files", unit="file") as pbar:
         for file_path in lab_files:
-            # Parse the lab file
             phonemes = parse_lab_file(file_path)
             
-            # Skip files with fewer than minimum required phonemes
             if len(phonemes) < min_phoneme_count:
-                tqdm.write(f"Skipping {os.path.basename(file_path)}: Only has {len(phonemes)} phonemes (min: {min_phoneme_count})")
                 skipped_files_count += 1
                 pbar.update(1)
                 continue
             
-            # Find the corresponding wav file
             wav_file_path = find_wav_file(file_path, raw_dir)
             
-            # Get the base filename without extension
             base_filename = os.path.splitext(os.path.basename(file_path))[0]
             file_id = base_filename
             
-            # Extract mel spectrogram, F0, and calculate MIDI notes if wav file found
             mel_spec = None
             f0 = None
-            midi_notes = None
-            phoneme_midi = None
             if wav_file_path:
-                # Extract mel spectrogram
                 mel_spec = extract_mel_spectrogram(wav_file_path, config)
-                
-                # Extract F0 contour
                 f0 = extract_f0(wav_file_path, config)
-                
-                # Convert F0 to MIDI notes
-                if f0 is not None:
-                    midi_notes = f0_to_midi(f0)
-                    
-                    # Estimate MIDI notes for each phoneme
-                    sample_rate = config['audio']['sample_rate']
-                    hop_length = config['audio']['hop_length']
-                    phoneme_midi_tuples = estimate_phoneme_midi_notes(
-                        f0, 
-                        phonemes, 
-                        hop_length, 
-                        sample_rate
-                    )
-                    
-                    # Convert to numpy array
-                    phoneme_midi = np.array([midi for _, midi in phoneme_midi_tuples])
             
-            # Create arrays for each component
             phone_starts = np.array([p[0] for p in phonemes])
             phone_ends = np.array([p[1] for p in phonemes])
             phone_durations = phone_ends - phone_starts
             phone_texts = np.array([p[2] for p in phonemes], dtype=h5py.special_dtype(vlen=str))
             
-            # Calculate total duration by summing all phone durations
-            total_duration = np.sum(phone_durations)
-            
-            # Store the data for this file
             all_file_data[file_id] = {
                 'PHONE_START': phone_starts,
                 'PHONE_END': phone_ends,
                 'PHONE_DURATION': phone_durations,
                 'PHONE_TEXT': phone_texts,
                 'FILE_NAME': np.array([file_path], dtype=h5py.special_dtype(vlen=str)),
-                'TOTAL_DURATION': np.array([total_duration]),
                 'MEL_SPEC': mel_spec,
-                'F0': f0,
-                'MIDI_NOTES': midi_notes,
-                'PHONEME_MIDI': phoneme_midi
+                'F0': f0
             }
             
             processed_files_count += 1
             pbar.update(1)
     
-    # Print summary of files processed and skipped
-    logger.info(f"\nSummary:")
-    logger.info(f"Total files found: {len(lab_files)}")
     logger.info(f"Files processed: {processed_files_count}")
-    logger.info(f"Files skipped (fewer than {min_phoneme_count} phonemes): {skipped_files_count}")
+    logger.info(f"Files skipped: {skipped_files_count}")
     
-    # Save all data to a single binary file
     if all_file_data:
-        bin_path = os.path.join(bin_dir, bin_file)
-        save_all_to_h5py(bin_path, all_file_data, phone_map)
-        
-        # Test reading the binary file and generate visualization
-        test_read_h5py(bin_path, config)
+        save_to_h5(output_path, all_file_data, phone_map, config, args.data_key, target_shape)
     else:
-        logger.warning("No files were processed. Binary file was not created.")
+        logger.warning("No files were processed. H5 file was not created.")
 
 if __name__ == "__main__":
     main()

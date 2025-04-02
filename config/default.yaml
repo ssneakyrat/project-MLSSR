@@ -9,7 +9,7 @@ data:
   phone_map:                  # Will be populated by preprocess.py
   raw_dir: datasets/gin
   # Dataset subset settings
-  max_samples: 10 #null           # Maximum number of samples to use (takes precedence over sample_percentage)
+  max_samples: 20 #null           # Maximum number of samples to use (takes precedence over sample_percentage)
   sample_percentage: null     # Percentage of dataset to use (0.0-1.0)
   
 # Audio settings
@@ -31,7 +31,11 @@ model:
   time_frames: 128
   mel_bins: 80
   
-  # U-Net architecture
+  # Scaling factor for network size (default: 1.0)
+  # Increase for more capacity, decrease for smaller model
+  scale_factor: 1.0
+  
+  # U-Net architecture (base channel dimensions before scaling)
   encoder_channels: [16, 32, 64, 128]
   bottleneck_channels: 256
   decoder_channels: [64, 32, 16, 1]
@@ -42,7 +46,7 @@ model:
 
 # Training settings
 train:
-  batch_size: 1 #32
+  batch_size: 2 #32
   num_epochs: 1000
   learning_rate: 0.001 #0.001
   weight_decay: 0.0001 #0.0001

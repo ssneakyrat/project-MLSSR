@@ -95,20 +95,39 @@ class UNet(pl.LightningModule):
         self.loss_beta = config['model'].get('loss_beta', 0.2)
         self.loss_fn = CombinedLoss(alpha=self.loss_alpha, beta=self.loss_beta)
         
+        # Get scale factor from config (default to 1.0 if not specified)
+        self.scale_factor = config['model'].get('scale_factor', 1.0)
+        
+        # Get channel dimensions from config, or use defaults if not specified
+        encoder_channels = config['model'].get('encoder_channels', [16, 32, 64, 128])
+        bottleneck_channels = config['model'].get('bottleneck_channels', 256)
+        decoder_channels = config['model'].get('decoder_channels', [64, 32, 16, 1])
+        
+        # Scale the channel dimensions (except for the input/output channels)
+        self.encoder_channels = [1] + [int(c * self.scale_factor) for c in encoder_channels]
+        self.bottleneck_channels = int(bottleneck_channels * self.scale_factor)
+        self.decoder_channels = [int(c * self.scale_factor) for c in decoder_channels[:-1]] + [1]  # Keep output channel at 1
+        
+        # Log the scaled architecture
+        print(f"UNet Scale Factor: {self.scale_factor}")
+        print(f"Encoder channels: {self.encoder_channels}")
+        print(f"Bottleneck channels: {self.bottleneck_channels}")
+        print(f"Decoder channels: {self.decoder_channels}")
+        
         # Encoder path
-        self.enc1 = EncoderBlock(1, 16)
-        self.enc2 = EncoderBlock(16, 32)
-        self.enc3 = EncoderBlock(32, 64)
-        self.enc4 = EncoderBlock(64, 128)
+        self.enc1 = EncoderBlock(self.encoder_channels[0], self.encoder_channels[1])
+        self.enc2 = EncoderBlock(self.encoder_channels[1], self.encoder_channels[2])
+        self.enc3 = EncoderBlock(self.encoder_channels[2], self.encoder_channels[3])
+        self.enc4 = EncoderBlock(self.encoder_channels[3], self.encoder_channels[4])
         
         # Bottleneck
-        self.bottleneck = Bottleneck(128, 256)
+        self.bottleneck = Bottleneck(self.encoder_channels[4], self.bottleneck_channels)
         
         # Decoder path
-        self.dec1 = DecoderBlock(128, 64)
-        self.dec2 = DecoderBlock(64, 32)
-        self.dec3 = DecoderBlock(32, 16)
-        self.dec4 = DecoderBlock(16, 1)
+        self.dec1 = DecoderBlock(self.encoder_channels[4], self.decoder_channels[0])
+        self.dec2 = DecoderBlock(self.decoder_channels[0], self.decoder_channels[1])
+        self.dec3 = DecoderBlock(self.decoder_channels[1], self.decoder_channels[2])
+        self.dec4 = DecoderBlock(self.decoder_channels[2], self.decoder_channels[3])
         
         # Final output layer
         self.output = nn.Sigmoid()  # Ensure output is in [0,1] range

@@ -5,3 +5,4 @@ logs/
 datasets/
 results/
 usage.txt
+inference_test.py

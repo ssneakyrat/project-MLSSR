@@ -158,15 +158,11 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
         
     def setup(self, stage=None):
         """
-        Setup train/val/test datasets with caching to prevent reloading.
-        This method is called on every GPU.
-        
-        Args:
-            stage (str, optional): 'fit', 'validate', 'test', or 'predict'
+        Setup train/val/test datasets with improved handling for multiprocessing.
         """
         # Load data items only once
         if self.data_items is None:
-            self.data_items = load_dataset(split='train', shuffle=True, lazy_load=True)
+            self.data_items = load_dataset(split='train', shuffle=True, lazy_load=False if self.num_workers > 0 else True)
             
             if len(self.data_items) == 0:
                 raise ValueError("No data items found. Make sure the dataset is properly prepared.")
@@ -217,7 +213,7 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
                 )
             
             print(f"Setup complete. Train dataset: {len(self.train_dataset)} items, "
-                 f"Validation dataset: {len(self.val_dataset)} items")
+                f"Validation dataset: {len(self.val_dataset)} items")
         
     def train_dataloader(self):
         """

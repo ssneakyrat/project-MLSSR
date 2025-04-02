@@ -1,15 +1,12 @@
-import torch
-import os
-from torch.utils.data import Dataset
-import numpy as np
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader, random_split
 import h5py
+import os
+import random
+import torch
+from torch.utils.data import Dataset
+from utils.utils_general import load_config
 
+# Add a global H5 file manager to keep file handles open
 class H5FileManager:
-    """
-    Singleton class to manage H5 file handles.
-    """
     _instance = None
     
     @staticmethod
@@ -31,206 +28,199 @@ class H5FileManager:
             file.close()
         self.h5_files = {}
 
-class MelSpectrogramDataset(Dataset):
+def test_load_data():
     """
-    Dataset for mel spectrogram reconstruction using generic H5 format.
+    Test function to load data from a single h5 binary file and print 3 random sample file names.
+    
+    Returns:
+        list: List of file names for the 3 random samples
     """
-    def __init__(self, h5_path, data_key='mel_spectrograms', lazy_load=True):
-        """
-        Initialize the dataset.
-        
-        Args:
-            h5_path (str): Path to the H5 file
-            data_key (str): Key for the mel spectrograms in the H5 file
-            lazy_load (bool): Whether to use lazy loading
-        """
-        self.h5_path = h5_path
-        self.data_key = data_key
-        self.lazy_load = lazy_load
-        
-        # Get file handle using H5FileManager for lazy loading
-        if lazy_load:
-            h5_manager = H5FileManager.get_instance()
-            h5_file = h5_manager.get_file(h5_path)
-        else:
-            h5_file = h5py.File(h5_path, 'r')
-        
-        # Check if data key exists
-        if data_key not in h5_file:
-            raise KeyError(f"Data key '{data_key}' not found in {h5_path}")
-        
-        # Get dataset info
-        self.data_shape = h5_file[data_key].shape
-        self.num_samples = self.data_shape[0]
-        
-        # Print dataset information
-        print(f"Loaded mel spectrogram dataset from {h5_path}")
-        print(f"Data shape: {self.data_shape}")
-        print(f"Number of samples: {self.num_samples}")
-        
-        # If not using lazy loading, load all data at once
-        if not lazy_load:
-            self.data = h5_file[data_key][:]
-            h5_file.close()
+    # Load configuration
+    config = load_config()
     
-    def __len__(self):
-        """
-        Get the number of items in the dataset.
-        
-        Returns:
-            int: Number of items
-        """
-        return self.num_samples
+    # Get the path to the binary directory and file
+    bin_dir = config['data']['bin_dir']
+    bin_file = config['data']['bin_file']
+    bin_path = os.path.join(bin_dir, bin_file)
     
-    def __getitem__(self, idx):
-        """
-        Get an item from the dataset.
+    print(f"Loading data from {bin_path}")
+    
+    # Check if the binary file exists
+    if not os.path.exists(bin_path):
+        print(f"Error: Binary file {bin_path} not found!")
+        return []
+    
+    try:
+        h5_manager = H5FileManager.get_instance()
+        f = h5_manager.get_file(bin_path)
         
-        Args:
-            idx (int): Index
+        # Check if there's a data group
+        if 'data' in f:
+            data_group = f['data']
             
-        Returns:
-            torch.Tensor: Mel spectrogram tensor of shape [1, F, T]
-        """
-        # Get mel spectrogram
-        if self.lazy_load:
-            # Lazy loading - get from H5 file
-            h5_manager = H5FileManager.get_instance()
-            h5_file = h5_manager.get_file(self.h5_path)
-            mel_spec = h5_file[self.data_key][idx]
+            # Get all file IDs (keys in the data group)
+            file_ids = list(data_group.keys())
+            
+            if not file_ids:
+                print("Error: No files found in the data group")
+                return []
+            
+            # Print total number of files
+            print(f"Total number of files in dataset: {len(file_ids)}")
+            
+            # Select 3 random files or fewer if there are less than 3 samples
+            num_samples = min(3, len(file_ids))
+            random_ids = random.sample(file_ids, num_samples)
+            
+            # Get the file names for the selected files
+            selected_files = []
+            
+            print(f"Selected {num_samples} random samples:")
+            for i, file_id in enumerate(random_ids):
+                file_group = data_group[file_id]
+                
+                if 'FILE_NAME' in file_group:
+                    file_name = file_group['FILE_NAME'][0]
+                    selected_files.append(file_name)
+                    print(f"  {i+1}. ID: {file_id}, File: {file_name}")
+                    
+                    # Print additional information
+                    if 'PHONE_TEXT' in file_group:
+                        num_phonemes = len(file_group['PHONE_TEXT'])
+                        print(f"     Number of phonemes: {num_phonemes}")
+                    
+                    if 'MEL_SPEC' in file_group:
+                        mel_shape = file_group['MEL_SPEC'].shape
+                        print(f"     Mel spectrogram shape: {mel_shape}")
+                else:
+                    print(f"  {i+1}. ID: {file_id} - FILE_NAME not found")
+            
+            return selected_files
         else:
-            # Already loaded - get from memory
-            mel_spec = self.data[idx]
-        
-        # Convert to tensor and add channel dimension
-        mel_tensor = torch.from_numpy(mel_spec).float().unsqueeze(0)
-        
-        return mel_tensor
+            print("Error: 'data' group not found in the binary file")
+    except Exception as e:
+        print(f"Error loading data from binary file: {e}")
+    
+    return []
 
-def collate_fn(batch):
+def load_dataset(split="train", shuffle=True, lazy_load=True):
     """
-    Custom collate function.
+    Load the dataset for training or evaluation with support for lazy loading.
     
     Args:
-        batch (list): List of tensors
+        split (str): Dataset split, either "train", "val", or "test"
+        shuffle (bool): Whether to shuffle the data
+        lazy_load (bool): Whether to lazily load data or load everything immediately
         
     Returns:
-        torch.Tensor: Batch tensor
+        list: List of data items with references or actual data
     """
-    # Simply stack tensors along the batch dimension
-    return torch.stack(batch, dim=0)
-
-class MelSpectrogramDataModule(pl.LightningDataModule):
-    """
-    PyTorch Lightning DataModule for mel spectrogram dataset.
-    """
-    def __init__(self, config):
-        """
-        Initialize the data module.
-        
-        Args:
-            config (dict): Configuration dictionary
-        """
-        super().__init__()
-        self.config = config
-        self.batch_size = config['train']['batch_size']
-        self.num_workers = config['train'].get('num_workers', 4)
-        self.pin_memory = config['train'].get('pin_memory', True)
-        self.validation_split = config['train'].get('validation_split', 0.1)
-        
-        # Get H5 file path from config
-        self.h5_path = os.path.join(
-            config['data']['bin_dir'],
-            config['data']['bin_file']
-        )
-        
-        # Set data key - default to 'mel_spectrograms'
-        self.data_key = config['data'].get('data_key', 'mel_spectrograms')
-        
-        # Lazy loading setting - default to True for multi-worker dataloaders
-        self.lazy_load = config['data'].get('lazy_load', self.num_workers == 0)
-        
-        # Track dataset instances
-        self.dataset = None
-        self.train_dataset = None
-        self.val_dataset = None
-        
-    def prepare_data(self):
-        """
-        Download or prepare data if necessary.
-        This method is called only once and on only one GPU.
-        """
-        # Nothing to do here as data is already prepared
-        pass
-        
-    def setup(self, stage=None):
-        """
-        Setup train/val datasets.
-        """
-        if self.dataset is None:
-            # Create dataset
-            self.dataset = MelSpectrogramDataset(
-                h5_path=self.h5_path,
-                data_key=self.data_key,
-                lazy_load=self.lazy_load
-            )
-            
-            # Split into train and validation sets
-            val_size = int(len(self.dataset) * self.validation_split)
-            train_size = len(self.dataset) - val_size
-            
-            # Create a generator with fixed seed for reproducibility
-            generator = torch.Generator().manual_seed(42)
-            
-            # Split dataset
-            self.train_dataset, self.val_dataset = random_split(
-                self.dataset, 
-                [train_size, val_size],
-                generator=generator
-            )
-            
-            print(f"Dataset split: {train_size} training samples, {val_size} validation samples")
+    # Load configuration
+    config = load_config()
     
-    def train_dataloader(self):
-        """
-        Create the training dataloader.
+    # Get the path to the binary directory and file
+    bin_dir = config['data']['bin_dir']
+    bin_file = config['data']['bin_file']
+    bin_path = os.path.join(bin_dir, bin_file)
+    
+    # Check if the binary file exists
+    if not os.path.exists(bin_path):
+        print(f"Error: Binary file {bin_path} not found!")
+        return []
+    
+    # Load all data
+    data_items = []
+    
+    try:
+        # Get persistent file handle if using lazy loading
+        if lazy_load:
+            h5_manager = H5FileManager.get_instance()
+            f = h5_manager.get_file(bin_path)
+            file_needs_closing = False
+        else:
+            f = h5py.File(bin_path, 'r')
+            file_needs_closing = True
         
-        Returns:
-            DataLoader: Training dataloader
-        """
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            drop_last=True,
-            collate_fn=collate_fn
-        )
+        if 'data' in f:
+            data_group = f['data']
+            
+            # Get all file IDs
+            file_ids = list(data_group.keys())
+            
+            # Print total number of files
+            print(f"Loading {split} split from {len(file_ids)} total files")
+            
+            # Process each file
+            for file_id in file_ids:
+                file_group = data_group[file_id]
+                
+                # Create a data item
+                data_item = {
+                    'id': file_id,
+                    'file_name': file_group['FILE_NAME'][0]
+                }
+                
+                # Add phoneme data
+                if 'PHONE_TEXT' in file_group:
+                    if lazy_load:
+                        # Store dataset reference
+                        data_item['phone_texts'] = file_group['PHONE_TEXT']
+                        data_item['phone_starts'] = file_group['PHONE_START']
+                        data_item['phone_ends'] = file_group['PHONE_END']
+                        data_item['phone_durations'] = file_group['PHONE_DURATION']
+                    else:
+                        # Load data immediately
+                        data_item['phone_texts'] = file_group['PHONE_TEXT'][:]
+                        data_item['phone_starts'] = file_group['PHONE_START'][:]
+                        data_item['phone_ends'] = file_group['PHONE_END'][:]
+                        data_item['phone_durations'] = file_group['PHONE_DURATION'][:]
+                
+                # Add mel spectrogram
+                if 'MEL_SPEC' in file_group:
+                    if lazy_load:
+                        data_item['mel_spec'] = file_group['MEL_SPEC']  # Store reference
+                        data_item['mel_spec_path'] = bin_path  # Store path for later loading
+                        data_item['mel_spec_id'] = file_id     # Store ID for access
+                    else:
+                        data_item['mel_spec'] = file_group['MEL_SPEC'][:]
+                
+                # Add F0
+                if 'F0' in file_group:
+                    if lazy_load:
+                        data_item['f0'] = file_group['F0']  # Store reference
+                    else:
+                        data_item['f0'] = file_group['F0'][:]
+                
+                # Add MIDI notes
+                if 'MIDI_NOTES' in file_group:
+                    if lazy_load:
+                        data_item['midi_notes'] = file_group['MIDI_NOTES']  # Store reference
+                    else:
+                        data_item['midi_notes'] = file_group['MIDI_NOTES'][:]
+                
+                # Add phoneme MIDI
+                if 'PHONEME_MIDI' in file_group:
+                    if lazy_load:
+                        data_item['phoneme_midi'] = file_group['PHONEME_MIDI']  # Store reference
+                    else:
+                        data_item['phoneme_midi'] = file_group['PHONEME_MIDI'][:]
+                
+                # Add the data item to the list
+                data_items.append(data_item)
         
-    def val_dataloader(self):
-        """
-        Create the validation dataloader.
-        
-        Returns:
-            DataLoader: Validation dataloader
-        """
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            collate_fn=collate_fn
-        )
-        
-    def teardown(self, stage=None):
-        """
-        Clean up after the training/testing is finished.
-        
-        Args:
-            stage (str, optional): 'fit', 'validate', 'test', or 'predict'
-        """
-        # Close any open H5 files when done
-        if stage == 'fit' or stage is None:
-            H5FileManager.get_instance().close_all()
+        # Close file if we opened it directly (not using manager)
+        if file_needs_closing:
+            f.close()
+            
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        if file_needs_closing and 'f' in locals():
+            f.close()
+    
+    # Shuffle the data if requested
+    if shuffle:
+        random.shuffle(data_items)
+    
+    print(f"Loaded {len(data_items)} items for {split} split")
+    print(f"Lazy loading is {'enabled' if lazy_load else 'disabled'}")
+    return data_items

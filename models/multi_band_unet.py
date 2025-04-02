@@ -1,3 +1,5 @@
+# Update in models/multi_band_unet.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +28,9 @@ class UNetBase(pl.LightningModule):
         
         self.scale_factor = config['model'].get('scale_factor', 1.0)
         self.layer_count = config['model'].get('layer_count', 4)
+        
+        # Support for variable length audio
+        self.variable_length_mode = config['model'].get('variable_length_mode', False)
         
         # Set up channel dimensions
         self._setup_channels()
@@ -86,37 +91,85 @@ class UNetBase(pl.LightningModule):
         raise NotImplementedError
     
     def training_step(self, batch, batch_idx):
-        x = batch
-        y = batch
-        
-        y_pred = self(x)
-        
-        loss = self.loss_fn(y_pred, y)
+        # Handle standard or variable length batches
+        if self.variable_length_mode:
+            x, mask = batch
+            y = x  # Autoencoder setup - target is the same as input
+            
+            y_pred = self(x)
+            
+            # Apply mask to compute loss only on real data (not padding)
+            if mask is not None:
+                # Expand mask to match y_pred dimensions
+                expanded_mask = mask.unsqueeze(1).unsqueeze(3).expand(-1, y_pred.size(1), -1, y_pred.size(3))
+                
+                # Apply mask - we'll compute loss only on real data points
+                masked_y_pred = y_pred * expanded_mask
+                masked_y = y * expanded_mask
+                
+                loss = self.loss_fn(masked_y_pred, masked_y)
+                l1_loss = F.l1_loss(masked_y_pred, masked_y)
+            else:
+                loss = self.loss_fn(y_pred, y)
+                l1_loss = F.l1_loss(y_pred, y)
+        else:
+            # Standard fixed-length processing
+            x = batch
+            y = batch
+            
+            y_pred = self(x)
+            
+            loss = self.loss_fn(y_pred, y)
+            l1_loss = F.l1_loss(y_pred, y)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_l1_loss', F.l1_loss(y_pred, y), on_step=False, on_epoch=True, logger=True)
+        self.log('train_l1_loss', l1_loss, on_step=False, on_epoch=True, logger=True)
         
         return loss
     
     def validation_step(self, batch, batch_idx):
-        x = batch
-        y = batch
-        
-        y_pred = self(x)
-        
-        loss = self.loss_fn(y_pred, y)
+        # Handle standard or variable length batches
+        if self.variable_length_mode:
+            x, mask = batch
+            y = x  # Autoencoder setup - target is the same as input
+            
+            y_pred = self(x)
+            
+            # Apply mask to compute loss only on real data (not padding)
+            if mask is not None:
+                # Expand mask to match y_pred dimensions
+                expanded_mask = mask.unsqueeze(1).unsqueeze(3).expand(-1, y_pred.size(1), -1, y_pred.size(3))
+                
+                # Apply mask
+                masked_y_pred = y_pred * expanded_mask
+                masked_y = y * expanded_mask
+                
+                loss = self.loss_fn(masked_y_pred, masked_y)
+                l1_loss = F.l1_loss(masked_y_pred, masked_y)
+            else:
+                loss = self.loss_fn(y_pred, y)
+                l1_loss = F.l1_loss(y_pred, y)
+        else:
+            # Standard fixed-length processing
+            x = batch
+            y = batch
+            
+            y_pred = self(x)
+            
+            loss = self.loss_fn(y_pred, y)
+            l1_loss = F.l1_loss(y_pred, y)
         
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('val_l1_loss', F.l1_loss(y_pred, y), on_step=False, on_epoch=True, logger=True)
+        self.log('val_l1_loss', l1_loss, on_step=False, on_epoch=True, logger=True)
         
         # Log validation images
         val_every_epoch = self.config['validation'].get('val_every_epoch', 1)
         if batch_idx == 0 and self.current_epoch % val_every_epoch == 0:
-            self._log_validation_images(x, y_pred)
+            self._log_validation_images(x, y_pred, mask if self.variable_length_mode else None)
         
         return loss
     
-    def _log_validation_images(self, inputs, predictions):
+    def _log_validation_images(self, inputs, predictions, mask=None):
         max_samples = min(self.config['validation'].get('max_samples', 4), inputs.size(0))
         indices = torch.randperm(inputs.size(0))[:max_samples]
         
@@ -124,7 +177,18 @@ class UNetBase(pl.LightningModule):
             input_mel = inputs[idx, 0].cpu().numpy()
             pred_mel = predictions[idx, 0].cpu().numpy()
             
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+            # If variable length, use mask to determine the actual length
+            if mask is not None:
+                # Get the actual length from the mask
+                sample_mask = mask[idx].cpu().numpy()
+                actual_length = sample_mask.sum()
+                
+                # Trim the spectrograms to the actual length
+                if actual_length > 0:
+                    input_mel = input_mel[:, :int(actual_length)]
+                    pred_mel = pred_mel[:, :int(actual_length)]
+            
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
             
             im1 = ax1.imshow(input_mel, origin='lower', aspect='auto', cmap='viridis')
             ax1.set_title('Input Mel Spectrogram')
@@ -194,7 +258,7 @@ class UNetBase(pl.LightningModule):
                 'optimizer': optimizer,
                 'lr_scheduler': scheduler
             }
-        
+
 class UNetResidualDualPath(UNetBase):
     def __init__(self, config):
         super().__init__(config)
@@ -374,7 +438,8 @@ class UNetResidualDualPath(UNetBase):
         # Final output layer
         self.output = nn.Sigmoid()
     
-    def forward(self, x):
+    def _forward_impl(self, x):
+        """Internal implementation of forward pass"""
         skip_connections = []
         
         # Encoder path
@@ -414,6 +479,53 @@ class UNetResidualDualPath(UNetBase):
         
         return x
     
+    def forward(self, x):
+        """Forward pass with variable length handling built-in"""
+        # Check input dimensions and correct if needed
+        if x.dim() == 4:
+            # Expected shape: [batch, channels, freq, time]
+            batch_size, channels, dim1, dim2 = x.shape
+            
+            # If channels > 1 and dim1 is large (likely frequency bins), reshape
+            if channels > 1 and dim1 < dim2:
+                # This is [batch, freq, time, 1] or similar incorrect format
+                # Reshape to [batch, 1, freq, time]
+                x = x.permute(0, 3, 1, 2)
+                # If the channel dimension is still not 1, fix it
+                if x.shape[1] != 1:
+                    x = x.transpose(1, 2)
+                    
+        # Continue with variable length handling
+        if self.variable_length_mode:
+            # Extract original dimensions
+            batch_size, channels, freq_bins, time_frames = x.shape
+            
+            # Calculate padding needed to make time dimension divisible by 2^layer_count
+            target_size_multiple = 2 ** self.layer_count
+            original_time = time_frames
+            padded_time = ((time_frames + target_size_multiple - 1) // 
+                        target_size_multiple) * target_size_multiple
+            
+            pad_amount = padded_time - time_frames
+            
+            # Only pad if necessary
+            if pad_amount > 0:
+                # Pad the time dimension (dim=3)
+                x_padded = F.pad(x, (0, pad_amount, 0, 0), mode='constant', value=0)
+                
+                # Process with the model
+                output_padded = self._forward_impl(x_padded)
+                
+                # Crop back to original time dimension
+                output = output_padded[:, :, :, :original_time]
+                return output
+            else:
+                # No padding needed
+                return self._forward_impl(x)
+        else:
+            # Fixed-length mode, just pass through
+            return self._forward_impl(x)
+
 class FrequencyBandSplitter(nn.Module):
     """Split and merge frequency bands from mel spectrograms"""
     def __init__(self, mel_bins, num_bands=4, overlap_ratio=0.1):
@@ -553,7 +665,8 @@ class FrequencyBandSplitter(nn.Module):
 
 
 class MultiBandUNet(UNetResidualDualPath):
-    """U-Net model with separate processing paths for different frequency bands"""
+    """U-Net model with separate processing paths for different frequency bands
+    with support for variable length inputs"""
     def __init__(self, config):
         # Initialize with the parent class first
         super().__init__(config)
@@ -654,12 +767,28 @@ class MultiBandUNet(UNetResidualDualPath):
             self.band_bottlenecks.append(band_bottleneck)
             self.band_decoders.append(band_decoder)
     
-    def forward(self, x):
-        """Forward pass with multi-band processing"""
-        batch_size, channels, time_frames, freq_bins = x.shape
+    def _forward_impl(self, x):
+        """Internal implementation of forward pass with multi-band processing"""
+        # Check input dimensions and correct if needed
+        if x.dim() == 4:
+            batch_size, channels, dim1, dim2 = x.shape
+            
+            # If the shape looks more like [batch, freq, time, 1], fix it
+            if channels > 1 and dim1 < dim2:
+                # This is [batch, freq, time, channels] instead of [batch, channels, freq, time]
+                x = x.permute(0, 3, 1, 2)
+            
+            # Verify that channel dimension is 1
+            if x.shape[1] != 1:
+                print(f"Warning: Unexpected input shape {x.shape}. Expected channel dimension to be 1.")
+                # Force reshape
+                x = x.view(x.shape[0], 1, x.shape[2], x.shape[3])
+        
+        # Continue with the original implementation
+        batch_size, channels, freq_bins, time_frames = x.shape
         
         # 1. Process full spectrogram with the original path
-        full_output = super().forward(x)
+        full_output = super()._forward_impl(x)
         
         # 2. Split into frequency bands
         band_inputs = self.band_splitter.split(x)
@@ -695,7 +824,6 @@ class MultiBandUNet(UNetResidualDualPath):
                 band_outputs.append(band_x)
                 
             except RuntimeError as e:
-                # If we encounter any runtime error, use a fallback for this band
                 print(f"Error processing band {band_idx}: {e}")
                 
                 # Just pass through the input as output for this band
@@ -735,172 +863,34 @@ class MultiBandUNet(UNetResidualDualPath):
         
         return fused_output
     
-    def _log_validation_images(self, inputs, predictions):
-        """Log validation images including per-band visualizations to TensorBoard"""
-        max_samples = min(self.config['validation'].get('max_samples', 4), inputs.size(0))
-        indices = torch.randperm(inputs.size(0))[:max_samples]
-        
-        # Get visualization logging settings from config
-        logging_config = self.config['validation'].get('logging', {})
-        log_full_spectrum = logging_config.get('full_spectrum', True)
-        log_individual_bands = logging_config.get('individual_bands', True)
-        log_merged_outputs = logging_config.get('merged_outputs', True)
-        log_error_analysis = logging_config.get('error_analysis', True)
-        
-        for i, idx in enumerate(indices):
-            # 1. Log full spectrum (original method) if enabled
-            if log_full_spectrum:
-                input_mel = inputs[idx, 0].cpu().numpy()
-                pred_mel = predictions[idx, 0].cpu().numpy()
-                
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-                
-                im1 = ax1.imshow(input_mel, origin='lower', aspect='auto', cmap='viridis')
-                ax1.set_title('Input Mel Spectrogram')
-                ax1.set_xlabel('Time Frames')
-                ax1.set_ylabel('Mel Bins')
-                fig.colorbar(im1, ax=ax1)
-                
-                im2 = ax2.imshow(pred_mel, origin='lower', aspect='auto', cmap='viridis')
-                ax2.set_title('Reconstructed Mel Spectrogram')
-                ax2.set_xlabel('Time Frames')
-                ax2.set_ylabel('Mel Bins')
-                fig.colorbar(im2, ax=ax2)
-                
-                plt.tight_layout()
-                
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                buf.seek(0)
-                img = Image.open(buf)
-                img_tensor = torchvision.transforms.ToTensor()(img)
-                
-                self.logger.experiment.add_image(f'val_sample_{i}/full_spectrum', img_tensor, self.current_epoch)
-                
-                plt.close(fig)
+    def forward(self, x):
+        """Forward pass with variable length handling built-in"""
+        if self.variable_length_mode:
+            # Extract original dimensions
+            batch_size, channels, time_frames, freq_bins = x.shape
             
-            # 2. Log each frequency band if enabled
-            if log_individual_bands and hasattr(self, 'band_visualizations'):
-                band_inputs = self.band_visualizations['inputs']
-                band_outputs = self.band_visualizations['outputs']
-                band_boundaries = self.band_visualizations['band_boundaries']
-                
-                for band_idx, ((start, end), band_input, band_output) in enumerate(
-                        zip(band_boundaries, band_inputs, band_outputs)):
-                    
-                    # Get the band input/output for this sample
-                    band_input_mel = band_input[idx, 0].cpu().numpy()
-                    band_output_mel = band_output[idx, 0].cpu().numpy()
-                    
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-                    
-                    im1 = ax1.imshow(band_input_mel, origin='lower', aspect='auto', cmap='viridis')
-                    ax1.set_title(f'Band {band_idx+1} Input (Bins {start}-{end})')
-                    ax1.set_xlabel('Time Frames')
-                    ax1.set_ylabel('Mel Bins')
-                    fig.colorbar(im1, ax=ax1)
-                    
-                    im2 = ax2.imshow(band_output_mel, origin='lower', aspect='auto', cmap='viridis')
-                    ax2.set_title(f'Band {band_idx+1} Output (Bins {start}-{end})')
-                    ax2.set_xlabel('Time Frames')
-                    ax2.set_ylabel('Mel Bins')
-                    fig.colorbar(im2, ax=ax2)
-                    
-                    plt.tight_layout()
-                    
-                    buf = io.BytesIO()
-                    plt.savefig(buf, format='png')
-                    buf.seek(0)
-                    img = Image.open(buf)
-                    img_tensor = torchvision.transforms.ToTensor()(img)
-                    
-                    self.logger.experiment.add_image(f'val_sample_{i}/band_{band_idx+1}', img_tensor, self.current_epoch)
-                    
-                    plt.close(fig)
+            # Calculate padding needed to make time dimension divisible by 2^layer_count
+            target_size_multiple = 2 ** self.layer_count
+            original_time = time_frames
+            padded_time = ((time_frames + target_size_multiple - 1) // 
+                           target_size_multiple) * target_size_multiple
             
-            # 3. Log the band-merged output if enabled
-            if log_merged_outputs and hasattr(self, 'band_visualizations'):
-                band_merged = self.band_visualizations['merged'][idx, 0].cpu().numpy()
-                final_output = self.band_visualizations['final'][idx, 0].cpu().numpy()
+            pad_amount = padded_time - time_frames
+            
+            # Only pad if necessary
+            if pad_amount > 0:
+                # Pad the time dimension (dim=2)
+                x_padded = F.pad(x, (0, 0, 0, pad_amount), mode='constant', value=0)
                 
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                # Process with the model
+                output_padded = self._forward_impl(x_padded)
                 
-                im1 = ax1.imshow(band_merged, origin='lower', aspect='auto', cmap='viridis')
-                ax1.set_title('Band-Merged Output')
-                ax1.set_xlabel('Time Frames')
-                ax1.set_ylabel('Mel Bins')
-                fig.colorbar(im1, ax=ax1)
-                
-                im2 = ax2.imshow(final_output, origin='lower', aspect='auto', cmap='viridis')
-                ax2.set_title('Final Fused Output')
-                ax2.set_xlabel('Time Frames')
-                ax2.set_ylabel('Mel Bins')
-                fig.colorbar(im2, ax=ax2)
-                
-                plt.tight_layout()
-                
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                buf.seek(0)
-                img = Image.open(buf)
-                img_tensor = torchvision.transforms.ToTensor()(img)
-                
-                self.logger.experiment.add_image(f'val_sample_{i}/merged_outputs', img_tensor, self.current_epoch)
-                
-                plt.close(fig)
-                
-            # 4. Create frequency-band analysis visualization if enabled
-            if log_error_analysis and hasattr(self, 'band_visualizations'):
-                input_mel = inputs[idx, 0].cpu().numpy()
-                pred_mel = predictions[idx, 0].cpu().numpy()
-                band_boundaries = self.band_visualizations['band_boundaries']
-                
-                fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-                axs = axs.flatten()
-                
-                # Plot error heatmap (abs difference between input and output)
-                error = np.abs(input_mel - pred_mel)
-                im = axs[0].imshow(error, origin='lower', aspect='auto', cmap='hot')
-                axs[0].set_title('Reconstruction Error Heatmap')
-                axs[0].set_xlabel('Time Frames')
-                axs[0].set_ylabel('Mel Bins')
-                fig.colorbar(im, ax=axs[0])
-                
-                # Plot average error per frequency bin
-                bin_errors = np.mean(error, axis=0)
-                axs[1].plot(bin_errors)
-                axs[1].set_title('Average Error Per Frequency Bin')
-                axs[1].set_xlabel('Mel Bin')
-                axs[1].set_ylabel('Average Error')
-                
-                # Plot band boundaries
-                ax = axs[2]
-                band_colors = plt.cm.tab10(np.linspace(0, 1, self.num_bands))
-                for band_idx, ((start, end), color) in enumerate(zip(band_boundaries, band_colors)):
-                    ax.axvspan(start, end, alpha=0.3, color=color, label=f'Band {band_idx+1}')
-                
-                ax.plot(bin_errors, 'k-', linewidth=2)
-                ax.set_title('Band Boundaries and Error Distribution')
-                ax.set_xlabel('Mel Bin')
-                ax.set_ylabel('Average Error')
-                ax.legend()
-                
-                # Plot spectral analysis of errors
-                freq_analysis = np.fft.rfft(bin_errors)
-                freq_analysis = np.abs(freq_analysis)
-                axs[3].plot(freq_analysis)
-                axs[3].set_title('Spectral Analysis of Errors')
-                axs[3].set_xlabel('Frequency Component')
-                axs[3].set_ylabel('Magnitude')
-                
-                plt.tight_layout()
-                
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                buf.seek(0)
-                img = Image.open(buf)
-                img_tensor = torchvision.transforms.ToTensor()(img)
-                
-                self.logger.experiment.add_image(f'val_sample_{i}/error_analysis', img_tensor, self.current_epoch)
-                
-                plt.close(fig)
+                # Crop back to original time dimension
+                output = output_padded[:, :, :original_time, :]
+                return output
+            else:
+                # No padding needed
+                return self._forward_impl(x)
+        else:
+            # Fixed-length mode, just pass through
+            return self._forward_impl(x)

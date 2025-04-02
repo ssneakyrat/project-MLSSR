@@ -1,4 +1,6 @@
-# Model configuration for Multi-Band U-Net mel spectrogram reconstruction
+# Updated config/model.yaml
+# Key changes for 10-second audio support
+
 data:
   bin_dir: datasets
   bin_file: mel_spectrograms.h5
@@ -7,6 +9,8 @@ data:
   raw_dir: datasets/gin
   max_samples: 100
   sample_percentage: null
+  # Added new parameter for variable length handling
+  variable_length: true
   
 audio:
   sample_rate: 22050
@@ -18,9 +22,13 @@ audio:
   fmax: 8000
   f0_min: 50
   f0_max: 600
+  # Added max_audio_length in seconds
+  max_audio_length: 10.0
 
 model:
-  time_frames: 128
+  # Updated time_frames to support 10 seconds of audio
+  # 10 seconds * 22050 Hz / 256 hop_length ≈ 861 frames
+  time_frames: 864  # Rounded to a multiple of 32 for cleaner downsampling
   mel_bins: 80
   scale_factor: 1
   layer_count: 4
@@ -29,8 +37,11 @@ model:
   decoder_channels: [64, 32, 16, 1]
   
   # Multi-band processing configuration
-  num_freq_bands: 4        # Number of frequency bands to process separately
-  band_overlap: 0.1        # Overlap ratio between bands (0.1 = 10% overlap)
+  num_freq_bands: 4
+  band_overlap: 0.1
+  
+  # Added setting to enable variable length processing
+  variable_length_mode: true
   
   nl_blocks:
     use_nl_blocks: true
@@ -55,7 +66,9 @@ model:
   loss_beta: 0.2
 
 train:
-  batch_size: 16            # Increased from 1 for better stability
+  # Reduced batch size to handle increased memory requirements
+  batch_size: 4
+  accumulate_grad_batches: 4
   num_epochs: 1000
   learning_rate: 0.001
   weight_decay: 0.0001
@@ -66,14 +79,15 @@ train:
   log_interval: 100
   save_dir: logs/multiband_model
   num_workers: 4
-  pin_memory: true
+  pin_memory: true,
+  precision: '16-mixed' #'32-true' '16-mixed'
   
 validation:
-  val_every_epoch: 10       # Log validation images every 5 epochs
-  max_samples: 4           # Number of samples to visualize
+  val_every_epoch: 10
+  max_samples: 4
   
   logging:
-    full_spectrum: true     # Log full spectrum input/output
-    individual_bands: false  # Log individual frequency band visualizations
-    merged_outputs: false    # Log band-merged and fused outputs
-    error_analysis: false    # Log frequency-band error analysis
+    full_spectrum: true
+    individual_bands: false
+    merged_outputs: false
+    error_analysis: false

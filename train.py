@@ -5,15 +5,15 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
-from models.unet_residual import UNetResidual
+from models.unet_residual_se import UNetResidualSE
 from data.mel_spectrogram_dataset import MelSpectrogramDataModule, H5FileManager
 
 def main():
     """
-    Main function for training the Residual U-Net model using PyTorch Lightning.
+    Main function for training the enhanced U-Net with SE blocks for mel spectrogram reconstruction.
     """
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Train Residual U-Net for mel spectrogram reconstruction')
+    parser = argparse.ArgumentParser(description='Train Enhanced U-Net with SE blocks for mel spectrogram reconstruction')
     parser.add_argument('--config', type=str, default='config/default.yaml',
                         help='Path to configuration file')
     parser.add_argument('--h5_path', type=str, default=None,
@@ -75,7 +75,7 @@ def main():
     
     # Get save directory from config if not provided
     save_dir = args.save_dir if args.save_dir is not None else config['train']['save_dir']
-    save_dir = os.path.join(save_dir, 'residual_unet')  # Add residual_unet subfolder
+    save_dir = os.path.join(save_dir, 'unet_residual_se')  # Use a different subfolder for the SE model
     
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
@@ -97,7 +97,7 @@ def main():
         # Save best model checkpoint
         ModelCheckpoint(
             monitor='val_loss',
-            filename='residual_unet-best',
+            filename='unet_residual_se-best',
             save_top_k=1,
             mode='min',
             dirpath=best_model_dir,
@@ -107,14 +107,14 @@ def main():
         # Early stopping
         EarlyStopping(
             monitor='val_loss',
-            patience=100,#config['train'].get('lr_patience', 5) * 2,
+            patience=50,  # More patience for this enhanced model
             mode='min',
-            verbose=False
+            verbose=True
         ),
     ]
     
-    # Initialize the LightningModule
-    model = UNetResidual(config)
+    # Initialize the LightningModule - now using the enhanced model with SE blocks
+    model = UNetResidualSE(config)
     
     # Initialize the DataModule
     data_module = MelSpectrogramDataModule(config)
@@ -134,11 +134,11 @@ def main():
     )
     
     # Start training
-    print("Starting Residual U-Net training with Lightning...")
+    print("Starting Enhanced U-Net with SE blocks training...")
     trainer.fit(model, data_module, ckpt_path=args.resume)
     
     # Print information about the best model
-    print(f"Training completed. Best model saved at: {best_model_dir}/residual_unet-best.ckpt")
+    print(f"Training completed. Best model saved at: {best_model_dir}/unet_residual_se-best.ckpt")
     print(f"Best validation loss: {trainer.callback_metrics.get('val_loss', 0):.6f}")
 
     # Clean up resources

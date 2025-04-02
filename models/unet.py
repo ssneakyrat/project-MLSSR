@@ -95,13 +95,61 @@ class UNet(pl.LightningModule):
         self.loss_beta = config['model'].get('loss_beta', 0.2)
         self.loss_fn = CombinedLoss(alpha=self.loss_alpha, beta=self.loss_beta)
         
-        # Get scale factor from config (default to 1.0 if not specified)
+        # Get scale factors from config
         self.scale_factor = config['model'].get('scale_factor', 1.0)
+        self.layer_count = config['model'].get('layer_count', 4)  # Default to 4 layers
         
-        # Get channel dimensions from config, or use defaults if not specified
-        encoder_channels = config['model'].get('encoder_channels', [16, 32, 64, 128])
-        bottleneck_channels = config['model'].get('bottleneck_channels', 256)
-        decoder_channels = config['model'].get('decoder_channels', [64, 32, 16, 1])
+        # Define channel progressions based on layer count
+        if self.layer_count == 2:
+            encoder_channels = [16, 32]
+            bottleneck_channels = 64
+            decoder_channels = [16, 1]
+        elif self.layer_count == 3:
+            encoder_channels = [16, 32, 64]
+            bottleneck_channels = 128
+            decoder_channels = [32, 16, 1]
+        elif self.layer_count == 4:  # Default
+            encoder_channels = [16, 32, 64, 128]
+            bottleneck_channels = 256
+            decoder_channels = [64, 32, 16, 1]
+        elif self.layer_count == 5:
+            encoder_channels = [16, 32, 64, 128, 256]
+            bottleneck_channels = 512
+            decoder_channels = [128, 64, 32, 16, 1]
+        elif self.layer_count == 6:
+            encoder_channels = [16, 32, 64, 128, 256, 512]
+            bottleneck_channels = 1024
+            decoder_channels = [256, 128, 64, 32, 16, 1]
+        else:
+            # Generate a progression for other layer counts
+            encoder_channels = []
+            for i in range(self.layer_count):
+                encoder_channels.append(16 * (2**i))
+            bottleneck_channels = encoder_channels[-1] * 2
+            
+            decoder_channels = []
+            for i in range(self.layer_count - 1):
+                idx = self.layer_count - 2 - i  # Count down from layer_count-2 to 0
+                decoder_channels.append(encoder_channels[idx])
+            decoder_channels.append(1)  # Output channel
+        
+        # Get channel dimensions from config, or use the defaults
+        config_encoder_channels = config['model'].get('encoder_channels', encoder_channels)
+        config_bottleneck_channels = config['model'].get('bottleneck_channels', bottleneck_channels)
+        config_decoder_channels = config['model'].get('decoder_channels', decoder_channels)
+        
+        # Use config provided channels if they match layer count, otherwise use defaults
+        if len(config_encoder_channels) == self.layer_count:
+            encoder_channels = config_encoder_channels
+        else:
+            print(f"Warning: config encoder_channels length ({len(config_encoder_channels)}) doesn't match layer_count ({self.layer_count}). Using default progression.")
+        
+        if len(config_decoder_channels) == self.layer_count:
+            decoder_channels = config_decoder_channels
+        else:
+            print(f"Warning: config decoder_channels length ({len(config_decoder_channels)}) doesn't match layer_count ({self.layer_count}). Using default progression.")
+        
+        bottleneck_channels = config_bottleneck_channels
         
         # Scale the channel dimensions (except for the input/output channels)
         self.encoder_channels = [1] + [int(c * self.scale_factor) for c in encoder_channels]
@@ -109,25 +157,33 @@ class UNet(pl.LightningModule):
         self.decoder_channels = [int(c * self.scale_factor) for c in decoder_channels[:-1]] + [1]  # Keep output channel at 1
         
         # Log the scaled architecture
-        print(f"UNet Scale Factor: {self.scale_factor}")
+        print(f"UNet Width Scale Factor: {self.scale_factor}")
+        print(f"UNet Layer Count: {self.layer_count}")
         print(f"Encoder channels: {self.encoder_channels}")
         print(f"Bottleneck channels: {self.bottleneck_channels}")
         print(f"Decoder channels: {self.decoder_channels}")
         
-        # Encoder path
-        self.enc1 = EncoderBlock(self.encoder_channels[0], self.encoder_channels[1])
-        self.enc2 = EncoderBlock(self.encoder_channels[1], self.encoder_channels[2])
-        self.enc3 = EncoderBlock(self.encoder_channels[2], self.encoder_channels[3])
-        self.enc4 = EncoderBlock(self.encoder_channels[3], self.encoder_channels[4])
+        # Create encoder blocks using ModuleList for dynamic layer count
+        self.encoder_blocks = nn.ModuleList()
+        for i in range(self.layer_count):
+            self.encoder_blocks.append(
+                EncoderBlock(self.encoder_channels[i], self.encoder_channels[i+1])
+            )
         
         # Bottleneck
-        self.bottleneck = Bottleneck(self.encoder_channels[4], self.bottleneck_channels)
+        self.bottleneck = Bottleneck(self.encoder_channels[-1], self.bottleneck_channels)
         
-        # Decoder path
-        self.dec1 = DecoderBlock(self.encoder_channels[4], self.decoder_channels[0])
-        self.dec2 = DecoderBlock(self.decoder_channels[0], self.decoder_channels[1])
-        self.dec3 = DecoderBlock(self.decoder_channels[1], self.decoder_channels[2])
-        self.dec4 = DecoderBlock(self.decoder_channels[2], self.decoder_channels[3])
+        # Create decoder blocks using ModuleList for dynamic layer count
+        self.decoder_blocks = nn.ModuleList()
+        for i in range(self.layer_count):
+            if i == 0:
+                in_channels = self.encoder_channels[-1]
+            else:
+                in_channels = self.decoder_channels[i-1]
+            
+            self.decoder_blocks.append(
+                DecoderBlock(in_channels, self.decoder_channels[i])
+            )
         
         # Final output layer
         self.output = nn.Sigmoid()  # Ensure output is in [0,1] range
@@ -147,20 +203,22 @@ class UNet(pl.LightningModule):
                 nn.init.constant_(m.bias, 0)
         
     def forward(self, x):
+        # Store skip connections
+        skip_connections = []
+        
         # Encoder path
-        x, skip1 = self.enc1(x)
-        x, skip2 = self.enc2(x)
-        x, skip3 = self.enc3(x)
-        x, skip4 = self.enc4(x)
+        for encoder in self.encoder_blocks:
+            x, skip = encoder(x)
+            skip_connections.append(skip)
         
         # Bottleneck
         x = self.bottleneck(x)
         
         # Decoder path with skip connections
-        x = self.dec1(x, skip4)
-        x = self.dec2(x, skip3)
-        x = self.dec3(x, skip2)
-        x = self.dec4(x, skip1)
+        for i, decoder in enumerate(self.decoder_blocks):
+            # Use skip connections in reverse order
+            skip = skip_connections[self.layer_count - 1 - i]
+            x = decoder(x, skip)
         
         # Final output
         x = self.output(x)

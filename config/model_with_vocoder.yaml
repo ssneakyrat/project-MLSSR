@@ -1,0 +1,127 @@
+# Extended config with HiFi-GAN vocoder integration
+# Based on the existing model.yaml with added vocoder section
+
+data:
+  bin_dir: datasets
+  bin_file: mel_spectrograms_with_audio.h5
+  data_key: mel_spectrograms
+  audio_key: waveforms  # New key for audio data
+  lazy_load: true
+  raw_dir: datasets/gin
+  max_samples: 100
+  sample_percentage: null
+  variable_length: true
+  
+audio:
+  sample_rate: 22050
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+  n_mels: 80
+  fmin: 0
+  fmax: 8000
+  f0_min: 50
+  f0_max: 600
+  max_audio_length: 10.0
+
+model:
+  # Original U-Net configuration parameters
+  time_frames: 864
+  mel_bins: 80
+  scale_factor: 1
+  layer_count: 4
+  encoder_channels: [16, 32, 64, 128]
+  bottleneck_channels: 256
+  decoder_channels: [64, 32, 16, 1]
+  
+  num_freq_bands: 4
+  band_overlap: 0.1
+  
+  variable_length_mode: true
+  
+  nl_blocks:
+    use_nl_blocks: true
+    nl_in_bottleneck: true
+    nl_mode: "embedded"
+    nl_encoder_layers: [-1]
+    nl_decoder_layers: [0]
+    nl_reduction_ratio: 2
+  
+  dual_path:
+    use_dual_path: true
+    dual_path_encoder_layers: [-2, -1]
+    dual_path_decoder_layers: [0, 1]
+
+  low_freq_emphasis:
+    use_lfe: true
+    lfe_encoder_layers: "all"
+    lfe_reduction_ratio: 8
+
+  attention_head: 4
+  loss_alpha: 0.8
+  loss_beta: 0.2
+
+# New vocoder section for HiFi-GAN configuration
+vocoder:
+  enabled: true
+  
+  # Model architecture parameters
+  upsample_initial_channel: 128  # Reduced from original 512
+  upsample_rates: [8, 8, 2, 2]   # Total upsampling factor = 256 (matching hop_length)
+  upsample_kernel_sizes: [16, 16, 4, 4]
+  resblock_kernel_sizes: [3, 7, 11]
+  resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
+  
+  # Discriminator parameters
+  disc_periods: [2, 3, 5, 7, 11]
+  disc_channels: 16
+  disc_max_channels: 256
+  
+  # Training parameters
+  joint_training: true  # Train U-Net and vocoder together
+  disc_start_step: 10000  # When to start training discriminator
+  disc_train_every: 1     # Train discriminator every N steps
+  gen_train_every: 1      # Train generator every N steps
+  
+  # Learning rates
+  gen_lr: 0.0002
+  disc_lr: 0.0002
+  
+  # Loss weights
+  lambda_adv: 1.0   # Adversarial loss weight
+  lambda_fm: 2.0    # Feature matching loss weight
+  lambda_mel: 45.0  # Mel-spectrogram loss weight
+  
+  # Component weights
+  unet_weight: 1.0   # Weight for U-Net loss
+  vocoder_weight: 1.0  # Weight for vocoder loss
+  
+  # Checkpoint handling
+  separate_checkpointing: true  # Save separate checkpoints for each component
+
+train:
+  batch_size: 4
+  accumulate_grad_batches: 4
+  num_epochs: 1000
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  lr_scheduler: reduce_on_plateau
+  lr_patience: 10
+  lr_factor: 0.8
+  validation_split: 0.1
+  log_interval: 100
+  save_dir: logs/multiband_with_vocoder
+  num_workers: 4
+  pin_memory: true
+  precision: '16-mixed' # '32-true' '16-mixed'
+  
+validation:
+  val_every_epoch: 5
+  max_samples: 4
+  
+  logging:
+    full_spectrum: true
+    individual_bands: false
+    merged_outputs: false
+    error_analysis: false
+    audio_samples: true  # Log audio samples during validation

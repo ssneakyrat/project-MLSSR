@@ -12,6 +12,7 @@ from models.residual_blocks import EncoderBlockResidual, DecoderBlockResidual, D
 from models.residual_blocks.se_blocks import EncoderBlockResidualSE, DecoderBlockResidualSE, SqueezeExcitationBlock
 from models.residual_blocks.non_local_blocks import NonLocalBlock, NonLocalAttentionBlock
 from models.residual_blocks.dual_path_blocks import DualPathBlock, EncoderBlockDualPath, DecoderBlockDualPath
+from models.residual_blocks.low_freq_emphasis import LowFrequencyEmphasisModule
 
 class UNetResidualDualPath(pl.LightningModule):
     """
@@ -31,6 +32,13 @@ class UNetResidualDualPath(pl.LightningModule):
         self.config = config
         self.save_hyperparameters()
         
+        # Add Low-Frequency Emphasis configuration
+        self.lfe_config = config['model'].get('low_freq_emphasis', {
+            'use_lfe': True,                   # Enable by default
+            'lfe_encoder_layers': 'all',       # Apply to all encoder layers
+            'lfe_reduction_ratio': 8           # Default reduction ratio
+        })
+
         # Initialize loss function
         self.loss_alpha = config['model'].get('loss_alpha', 0.8)
         self.loss_beta = config['model'].get('loss_beta', 0.2)
@@ -273,6 +281,26 @@ class UNetResidualDualPath(pl.LightningModule):
         else:
             self.decoder_nl_blocks = None
         
+        # Create Low-Frequency Emphasis modules for encoder layers
+        if self.lfe_config.get('use_lfe', True):
+            self.lfe_modules = nn.ModuleList()
+            lfe_layers = self.lfe_config.get('lfe_encoder_layers', 'all')
+            lfe_reduction_ratio = self.lfe_config.get('lfe_reduction_ratio', 8)
+            
+            for i in range(self.layer_count):
+                if lfe_layers == 'all' or i in (lfe_layers if isinstance(lfe_layers, list) else []):
+                    self.lfe_modules.append(
+                        LowFrequencyEmphasisModule(
+                            self.encoder_channels[i+1],
+                            reduction_ratio=lfe_reduction_ratio
+                        )
+                    )
+                    print(f"Adding Low-Frequency Emphasis to encoder layer {i+1}")
+                else:
+                    self.lfe_modules.append(None)
+        else:
+            self.lfe_modules = None
+
         # Final output layer
         self.output = nn.Sigmoid()  # Ensure output is in [0,1] range
         
@@ -297,7 +325,16 @@ class UNetResidualDualPath(pl.LightningModule):
         # Encoder path
         for i, encoder in enumerate(self.encoder_blocks):
             x, skip = encoder(x)
+            
+            # Store the skip connection BEFORE applying LFE
+            # This ensures the decoder receives skip connections with expected dimensions
             skip_connections.append(skip)
+            
+            # Apply Low-Frequency Emphasis if enabled (to the feature map, not the skip connection)
+            # This way we're enhancing the features without breaking the skip connection dimensions
+            if self.lfe_config.get('use_lfe', True) and self.lfe_modules is not None:
+                if self.lfe_modules[i] is not None:
+                    x = self.lfe_modules[i](x)  # Apply to features continuing in encoder path
             
             # Apply Non-Local Block to encoder output if specified
             if self.nl_blocks_config.get('use_nl_blocks', True) and self.encoder_nl_blocks is not None:

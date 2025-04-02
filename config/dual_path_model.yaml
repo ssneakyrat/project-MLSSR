@@ -56,6 +56,12 @@ model:
     dual_path_encoder_layers: [-2, -1]  # Indices of encoder layers for dual-path (-2, -1 = deeper layers)
     dual_path_decoder_layers: [0, 1]    # Indices of decoder layers for dual-path (0, 1 = earlier layers)
 
+  # Low-Frequency Emphasis module settings
+  low_freq_emphasis:
+    use_lfe: true                # Enable Low-Frequency Emphasis modules
+    lfe_encoder_layers: "all"    # Apply to all encoder layers (can be a list like [0, 1, 2])
+    lfe_reduction_ratio: 8       # Channel reduction ratio for efficiency
+
   # attention head
   attention_head: 4
 

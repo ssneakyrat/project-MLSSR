@@ -48,11 +48,13 @@ def pad_or_truncate_mel(mel_spec, target_length=128, target_bins=80):
     
     # Copy mel bins (frequency dimension)
     freq_bins_to_copy = min(curr_bins, target_bins)
-    resized_mel[:freq_bins_to_copy, :] = mel_spec[:freq_bins_to_copy, :]
     
     # Handle time dimension
     time_frames_to_copy = min(curr_length, target_length)
-    resized_mel[:, :time_frames_to_copy] = resized_mel[:, :time_frames_to_copy]
+    
+    # Copy the content from the original mel spectrogram to the resized one
+    # This fixes the bug in the original implementation where it was overwriting itself
+    resized_mel[:freq_bins_to_copy, :time_frames_to_copy] = mel_spec[:freq_bins_to_copy, :time_frames_to_copy]
     
     return resized_mel
 
@@ -73,7 +75,7 @@ def prepare_mel_for_model(mel_spec, target_length=128, target_bins=80):
     """
     # Ensure mel_spec is in the right orientation (F, T)
     if mel_spec.shape[0] > mel_spec.shape[1]:
-        # If time is first dimension, transpose
+        # If frequency dimension is larger than time dimension, transpose
         mel_spec = mel_spec.T
     
     # Normalize

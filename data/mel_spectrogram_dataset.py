@@ -28,10 +28,27 @@ class MelSpectrogramDataset(Dataset):
         self.valid_items = []
         for item in data_items:
             if 'mel_spec' in item and item['mel_spec'] is not None:
+                # Store the original shape for debugging
+                item['original_shape'] = item['mel_spec'].shape
                 self.valid_items.append(item)
         
         if len(self.valid_items) == 0:
             raise ValueError("No valid items with mel spectrograms found in the dataset")
+            
+        # Print shape statistics
+        shapes = [item['original_shape'] for item in self.valid_items]
+        print(f"Loaded {len(self.valid_items)} mel spectrograms")
+        print(f"Target shape: ({self.target_bins}, {self.target_length})")
+        
+        # Count how many need padding vs truncation in time dimension
+        need_padding = sum(1 for shape in shapes if shape[1] < self.target_length)
+        need_truncation = sum(1 for shape in shapes if shape[1] > self.target_length)
+        exact_match = sum(1 for shape in shapes if shape[1] == self.target_length)
+        
+        print(f"Time dimension statistics:")
+        print(f"  - Need padding: {need_padding} items (time frames < {self.target_length})")
+        print(f"  - Need truncation: {need_truncation} items (time frames > {self.target_length})")
+        print(f"  - Exact match: {exact_match} items (time frames = {self.target_length})")
     
     def __len__(self):
         """
@@ -59,25 +76,22 @@ class MelSpectrogramDataset(Dataset):
         # Get mel spectrogram
         mel_spec = item['mel_spec']
         
-        # Ensure mel_spec is in the right orientation (F, T)
-        if mel_spec.shape[0] < mel_spec.shape[1]:
-            # If time is second dimension (longer), no need to transpose
-            pass
-        else:
-            # If time is first dimension, transpose
+        # Ensure mel_spec is in the right orientation (F, T) where F=frequency bins, T=time frames
+        # In our case, we want shape (80, T) where 80 is the number of mel bins
+        if mel_spec.shape[0] != self.target_bins:
+            # If the first dimension is not the frequency dimension, transpose
             mel_spec = mel_spec.T
-        
-        # Normalize
+            
+        # Normalize the mel spectrogram to [0, 1] range
         mel_spec = normalize_mel_spectrogram(mel_spec)
         
-        # Pad or truncate
+        # Pad or truncate to the target dimensions
+        # This handles cases where the time dimension doesn't match the expected length
         mel_spec = pad_or_truncate_mel(mel_spec, self.target_length, self.target_bins)
         
         # Convert to tensor and add channel dimension
-        mel_tensor = torch.from_numpy(mel_spec).float()
-        
-        # Reshape to [1, F, T] for 2D convolution (batch, channels, height, width)
-        mel_tensor = mel_tensor.unsqueeze(0)
+        # The result will have shape [1, F, T] = [1, 80, 128]
+        mel_tensor = torch.from_numpy(mel_spec).float().unsqueeze(0)
         
         return mel_tensor
 

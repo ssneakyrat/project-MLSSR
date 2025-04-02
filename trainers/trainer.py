@@ -3,51 +3,15 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
 
 from models.unet import UNet
 from models.losses import CombinedLoss
-from utils.transforms import batch_prepare_mel_spectrograms
+from data.mel_spectrogram_dataset import MelSpectrogramDataset, collate_fn
 from trainers.validator import validate
-
-class MelSpectrogramDataset(Dataset):
-    """
-    Dataset for Mel Spectrogram reconstruction.
-    """
-    def __init__(self, data_items, target_length=128, target_bins=80):
-        """
-        Args:
-            data_items (list): List of data items from load_dataset
-            target_length (int): Target number of time frames
-            target_bins (int): Target number of mel bins
-        """
-        self.data_items = data_items
-        self.target_length = target_length
-        self.target_bins = target_bins
-    
-    def __len__(self):
-        return len(self.data_items)
-    
-    def __getitem__(self, idx):
-        # Get mel spectrogram
-        item = self.data_items[idx]
-        mel_spec = item['mel_spec']
-        
-        # Process mel spectrogram
-        mel_tensor = batch_prepare_mel_spectrograms([mel_spec], self.target_length, self.target_bins)
-        
-        # Return as a single tensor (removing batch dimension)
-        return mel_tensor.squeeze(0)
-
-def collate_fn(batch):
-    """
-    Collate function for DataLoader.
-    """
-    # Batch is already properly processed, just stack them
-    return torch.stack(batch, dim=0)
 
 def train(config, data_items, save_dir='runs/unet', num_epochs=100, batch_size=32,
           validation_split=0.1, log_interval=10, save_interval=10, device=None):

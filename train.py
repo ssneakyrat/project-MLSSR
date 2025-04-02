@@ -6,15 +6,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
 from models.unet import UNet
-from data.mel_spectrogram_dataset import MelSpectrogramDataModule
-
-def cleanup():
-    """
-    Clean up resources when the program is finished.
-    """
-    from utils.utils_datasets import H5FileManager
-    H5FileManager.get_instance().close_all()
-    print("Cleaned up H5 file resources")
+from data.mel_spectrogram_dataset import MelSpectrogramDataModule, H5FileManager
 
 def main():
     """
@@ -24,6 +16,10 @@ def main():
     parser = argparse.ArgumentParser(description='Train U-Net for mel spectrogram reconstruction using PyTorch Lightning')
     parser.add_argument('--config', type=str, default='config/default.yaml',
                         help='Path to configuration file')
+    parser.add_argument('--h5_path', type=str, default=None,
+                        help='Path to H5 file (overrides config)')
+    parser.add_argument('--data_key', type=str, default=None,
+                        help='Key for mel spectrograms in H5 file (overrides config)')
     parser.add_argument('--save_dir', type=str, default=None,
                         help='Directory to save checkpoints and logs (overrides config)')
     parser.add_argument('--batch_size', type=int, default=None,
@@ -53,6 +49,17 @@ def main():
         
     if args.val_split is not None:
         config['train']['validation_split'] = args.val_split
+    
+    if args.h5_path is not None:
+        # Override H5 path in config
+        # Extract directory and filename
+        h5_dir = os.path.dirname(args.h5_path)
+        h5_file = os.path.basename(args.h5_path)
+        config['data']['bin_dir'] = h5_dir
+        config['data']['bin_file'] = h5_file
+    
+    if args.data_key is not None:
+        config['data']['data_key'] = args.data_key
     
     # Get save directory from config if not provided
     save_dir = args.save_dir if args.save_dir is not None else config['train']['save_dir']
@@ -109,7 +116,7 @@ def main():
         deterministic=True,  # Ensure reproducibility
         accelerator='auto',  # Automatically choose GPU if available
         devices='auto',      # Use all available devices
-        precision='32-true',  # Use 32-bit precision
+        precision='32-true', # Use 32-bit precision
         benchmark=True,      # If reproducibility is not critical, this can speed up training
         enable_checkpointing=True,
     )
@@ -123,7 +130,8 @@ def main():
     print(f"Best validation loss: {trainer.checkpoint_callback.best_model_score:.6f}")
 
     # Clean up resources
-    cleanup()
+    H5FileManager.get_instance().close_all()
+    print("Cleaned up H5 file resources")
     
 if __name__ == "__main__":
     main()

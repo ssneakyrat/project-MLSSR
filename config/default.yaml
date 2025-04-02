@@ -4,7 +4,9 @@
 data:
   bin_dir: datasets/gin/bin
   bin_file: gin.h5
-  phone_map:
+  data_key: mel_spectrograms  # Key for mel spectrograms in H5 file
+  lazy_load: true             # Use lazy loading for H5 data
+  phone_map:                  # Will be populated by preprocess.py
   raw_dir: datasets/gin
   
 # Audio settings

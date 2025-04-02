@@ -3,4 +3,5 @@
 .vscode/
 logs/
 datasets/
+results/
 usage.txt

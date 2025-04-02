@@ -3,58 +3,75 @@ import os
 from torch.utils.data import Dataset
 import numpy as np
 import pytorch_lightning as pl
-from utils.utils_transform import normalize_mel_spectrogram, pad_or_truncate_mel
 from torch.utils.data import DataLoader, random_split
-from utils.utils_datasets import load_dataset, H5FileManager
 import h5py
+
+class H5FileManager:
+    """
+    Singleton class to manage H5 file handles.
+    """
+    _instance = None
+    
+    @staticmethod
+    def get_instance():
+        if H5FileManager._instance is None:
+            H5FileManager._instance = H5FileManager()
+        return H5FileManager._instance
+    
+    def __init__(self):
+        self.h5_files = {}
+    
+    def get_file(self, file_path):
+        if file_path not in self.h5_files:
+            self.h5_files[file_path] = h5py.File(file_path, 'r')
+        return self.h5_files[file_path]
+    
+    def close_all(self):
+        for file in self.h5_files.values():
+            file.close()
+        self.h5_files = {}
 
 class MelSpectrogramDataset(Dataset):
     """
-    Dataset for mel spectrogram reconstruction with lazy loading support.
+    Dataset for mel spectrogram reconstruction using generic H5 format.
     """
-    def __init__(self, data_items, target_length=128, target_bins=80):
+    def __init__(self, h5_path, data_key='mel_spectrograms', lazy_load=True):
         """
         Initialize the dataset.
         
         Args:
-            data_items (list): List of data items from load_dataset()
-            target_length (int): Target number of time frames
-            target_bins (int): Target number of mel bins
+            h5_path (str): Path to the H5 file
+            data_key (str): Key for the mel spectrograms in the H5 file
+            lazy_load (bool): Whether to use lazy loading
         """
-        self.data_items = data_items
-        self.target_length = target_length
-        self.target_bins = target_bins
+        self.h5_path = h5_path
+        self.data_key = data_key
+        self.lazy_load = lazy_load
         
-        # Filter out items that don't have mel spectrograms
-        self.valid_items = []
-        for item in data_items:
-            if 'mel_spec' in item and item['mel_spec'] is not None:
-                # For lazy loading, we'll get the shape without loading all data
-                if isinstance(item['mel_spec'], h5py.Dataset):
-                    item['original_shape'] = item['mel_spec'].shape
-                else:
-                    # Already loaded, get shape directly
-                    item['original_shape'] = item['mel_spec'].shape
-                    
-                self.valid_items.append(item)
+        # Get file handle using H5FileManager for lazy loading
+        if lazy_load:
+            h5_manager = H5FileManager.get_instance()
+            h5_file = h5_manager.get_file(h5_path)
+        else:
+            h5_file = h5py.File(h5_path, 'r')
         
-        if len(self.valid_items) == 0:
-            raise ValueError("No valid items with mel spectrograms found in the dataset")
-            
-        # Print shape statistics
-        shapes = [item['original_shape'] for item in self.valid_items]
-        print(f"Loaded {len(self.valid_items)} mel spectrograms")
-        print(f"Target shape: ({self.target_bins}, {self.target_length})")
+        # Check if data key exists
+        if data_key not in h5_file:
+            raise KeyError(f"Data key '{data_key}' not found in {h5_path}")
         
-        # Count how many need padding vs truncation in time dimension
-        need_padding = sum(1 for shape in shapes if shape[1] < self.target_length)
-        need_truncation = sum(1 for shape in shapes if shape[1] > self.target_length)
-        exact_match = sum(1 for shape in shapes if shape[1] == self.target_length)
+        # Get dataset info
+        self.data_shape = h5_file[data_key].shape
+        self.num_samples = self.data_shape[0]
         
-        print(f"Time dimension statistics:")
-        print(f"  - Need padding: {need_padding} items (time frames < {self.target_length})")
-        print(f"  - Need truncation: {need_truncation} items (time frames > {self.target_length})")
-        print(f"  - Exact match: {exact_match} items (time frames = {self.target_length})")
+        # Print dataset information
+        print(f"Loaded mel spectrogram dataset from {h5_path}")
+        print(f"Data shape: {self.data_shape}")
+        print(f"Number of samples: {self.num_samples}")
+        
+        # If not using lazy loading, load all data at once
+        if not lazy_load:
+            self.data = h5_file[data_key][:]
+            h5_file.close()
     
     def __len__(self):
         """
@@ -63,45 +80,29 @@ class MelSpectrogramDataset(Dataset):
         Returns:
             int: Number of items
         """
-        return len(self.valid_items)
+        return self.num_samples
     
     def __getitem__(self, idx):
         """
-        Get an item from the dataset with lazy loading support.
+        Get an item from the dataset.
         
         Args:
             idx (int): Index
             
         Returns:
-            torch.Tensor: Processed mel spectrogram tensor of shape [1, T, F]
-                         where T is target_length and F is target_bins
+            torch.Tensor: Mel spectrogram tensor of shape [1, F, T]
         """
-        # Get the data item
-        item = self.valid_items[idx]
-        
-        # Get mel spectrogram - check if it's a reference or actual data
-        if isinstance(item['mel_spec'], h5py.Dataset):
-            # Lazy loading - only load the data now
-            mel_spec = item['mel_spec'][:]
+        # Get mel spectrogram
+        if self.lazy_load:
+            # Lazy loading - get from H5 file
+            h5_manager = H5FileManager.get_instance()
+            h5_file = h5_manager.get_file(self.h5_path)
+            mel_spec = h5_file[self.data_key][idx]
         else:
-            # Data already loaded
-            mel_spec = item['mel_spec']
-        
-        # Ensure mel_spec is in the right orientation (F, T) where F=frequency bins, T=time frames
-        # In our case, we want shape (80, T) where 80 is the number of mel bins
-        if mel_spec.shape[0] != self.target_bins:
-            # If the first dimension is not the frequency dimension, transpose
-            mel_spec = mel_spec.T
-            
-        # Normalize the mel spectrogram to [0, 1] range
-        mel_spec = normalize_mel_spectrogram(mel_spec)
-        
-        # Pad or truncate to the target dimensions
-        # This handles cases where the time dimension doesn't match the expected length
-        mel_spec = pad_or_truncate_mel(mel_spec, self.target_length, self.target_bins)
+            # Already loaded - get from memory
+            mel_spec = self.data[idx]
         
         # Convert to tensor and add channel dimension
-        # The result will have shape [1, F, T] = [1, 80, 128]
         mel_tensor = torch.from_numpy(mel_spec).float().unsqueeze(0)
         
         return mel_tensor
@@ -121,7 +122,7 @@ def collate_fn(batch):
 
 class MelSpectrogramDataModule(pl.LightningDataModule):
     """
-    PyTorch Lightning DataModule for mel spectrogram dataset with improved caching.
+    PyTorch Lightning DataModule for mel spectrogram dataset.
     """
     def __init__(self, config):
         """
@@ -137,16 +138,22 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
         self.pin_memory = config['train'].get('pin_memory', True)
         self.validation_split = config['train'].get('validation_split', 0.1)
         
-        # Set dataset parameters
-        self.target_length = config['model'].get('time_frames', 128)
-        self.target_bins = config['model'].get('mel_bins', 80)
+        # Get H5 file path from config
+        self.h5_path = os.path.join(
+            config['data']['bin_dir'],
+            config['data']['bin_file']
+        )
         
-        # Track dataset instances and cache
+        # Set data key - default to 'mel_spectrograms'
+        self.data_key = config['data'].get('data_key', 'mel_spectrograms')
+        
+        # Lazy loading setting - default to True for multi-worker dataloaders
+        self.lazy_load = config['data'].get('lazy_load', self.num_workers == 0)
+        
+        # Track dataset instances
+        self.dataset = None
         self.train_dataset = None
         self.val_dataset = None
-        self.data_items = None  # Cache for loaded data
-        self.train_items = None  # Cache for train split
-        self.val_items = None    # Cache for val split
         
     def prepare_data(self):
         """
@@ -158,63 +165,32 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
         
     def setup(self, stage=None):
         """
-        Setup train/val/test datasets with improved handling for multiprocessing.
+        Setup train/val datasets.
         """
-        # Load data items only once
-        if self.data_items is None:
-            self.data_items = load_dataset(split='train', shuffle=True, lazy_load=False if self.num_workers > 0 else True)
-            
-            if len(self.data_items) == 0:
-                raise ValueError("No data items found. Make sure the dataset is properly prepared.")
-            
-            # Filter items to only include those with mel spectrograms
-            valid_items = []
-            for item in self.data_items:
-                if 'mel_spec' in item and item['mel_spec'] is not None:
-                    valid_items.append(item)
-            
-            if len(valid_items) == 0:
-                raise ValueError("No valid items with mel spectrograms found in the dataset. Check preprocessing.")
-                
-            print(f"Found {len(valid_items)} valid items with mel spectrograms out of {len(self.data_items)} total items.")
+        if self.dataset is None:
+            # Create dataset
+            self.dataset = MelSpectrogramDataset(
+                h5_path=self.h5_path,
+                data_key=self.data_key,
+                lazy_load=self.lazy_load
+            )
             
             # Split into train and validation sets
-            val_size = int(len(valid_items) * self.validation_split)
-            train_size = len(valid_items) - val_size
+            val_size = int(len(self.dataset) * self.validation_split)
+            train_size = len(self.dataset) - val_size
             
             # Create a generator with fixed seed for reproducibility
             generator = torch.Generator().manual_seed(42)
             
-            # Only split if we haven't done so already
-            if self.train_items is None or self.val_items is None:
-                split_result = random_split(
-                    valid_items, 
-                    [train_size, val_size],
-                    generator=generator
-                )
-                self.train_items, self.val_items = split_result
-        
-        # Create datasets if needed based on stage
-        if stage == 'fit' or stage is None:
-            if self.train_dataset is None:
-                print("Creating training dataset...")
-                self.train_dataset = MelSpectrogramDataset(
-                    list(self.train_items), 
-                    target_length=self.target_length, 
-                    target_bins=self.target_bins
-                )
+            # Split dataset
+            self.train_dataset, self.val_dataset = random_split(
+                self.dataset, 
+                [train_size, val_size],
+                generator=generator
+            )
             
-            if self.val_dataset is None:
-                print("Creating validation dataset...")
-                self.val_dataset = MelSpectrogramDataset(
-                    list(self.val_items), 
-                    target_length=self.target_length, 
-                    target_bins=self.target_bins
-                )
-            
-            print(f"Setup complete. Train dataset: {len(self.train_dataset)} items, "
-                f"Validation dataset: {len(self.val_dataset)} items")
-        
+            print(f"Dataset split: {train_size} training samples, {val_size} validation samples")
+    
     def train_dataloader(self):
         """
         Create the training dataloader.

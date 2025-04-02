@@ -6,7 +6,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
 from models.unet import UNet
-from data.mel_spectrogram_dataset import MelSpectrogramDataset
+from data.mel_spectrogram_dataset import MelSpectrogramDataModule
 
 
 def main():
@@ -91,7 +91,7 @@ def main():
     model = UNet(config)
     
     # Initialize the DataModule
-    data_module = MelSpectrogramDataset(config)
+    data_module = MelSpectrogramDataModule(config)
     
     # Initialize the Trainer
     trainer = pl.Trainer(

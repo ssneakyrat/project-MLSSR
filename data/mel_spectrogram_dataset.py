@@ -1,8 +1,10 @@
 import torch
+import os
 from torch.utils.data import Dataset
 import numpy as np
-
+import pytorch_lightning as pl
 from utils.utils_transform import normalize_mel_spectrogram, pad_or_truncate_mel
+from torch.utils.data import DataLoader, random_split
 
 class MelSpectrogramDataset(Dataset):
     """
@@ -90,3 +92,121 @@ def collate_fn(batch):
     """
     # Simply stack tensors along the batch dimension
     return torch.stack(batch, dim=0)
+
+class MelSpectrogramDataModule(pl.LightningDataModule):
+    """
+    PyTorch Lightning DataModule for mel spectrogram dataset.
+    """
+    def __init__(self, config):
+        """
+        Initialize the data module.
+        
+        Args:
+            config (dict): Configuration dictionary
+        """
+        super().__init__()
+        self.config = config
+        self.batch_size = config['train']['batch_size']
+        self.num_workers = config['train'].get('num_workers', 4)
+        self.pin_memory = config['train'].get('pin_memory', True)
+        self.validation_split = config['train'].get('validation_split', 0.1)
+        
+        # Set dataset parameters
+        self.target_length = config['model'].get('time_frames', 128)
+        self.target_bins = config['model'].get('mel_bins', 80)
+        
+        # Track dataset instances
+        self.train_dataset = None
+        self.val_dataset = None
+        
+    def prepare_data(self):
+        """
+        Download or prepare data if necessary.
+        This method is called only once and on only one GPU.
+        """
+        # Nothing to do here as data is already prepared
+        pass
+        
+    def setup(self, stage=None):
+        """
+        Setup train/val/test datasets.
+        This method is called on every GPU.
+        
+        Args:
+            stage (str, optional): 'fit', 'validate', 'test', or 'predict'
+        """
+        # Load all data items
+        data_items = load_dataset(split='train', shuffle=True)
+        
+        if len(data_items) == 0:
+            raise ValueError("No data items found. Make sure the dataset is properly prepared.")
+        
+        # Filter items to only include those with mel spectrograms
+        valid_items = []
+        for item in data_items:
+            if 'mel_spec' in item and item['mel_spec'] is not None:
+                valid_items.append(item)
+        
+        if len(valid_items) == 0:
+            raise ValueError("No valid items with mel spectrograms found in the dataset. Check preprocessing.")
+            
+        print(f"Found {len(valid_items)} valid items with mel spectrograms out of {len(data_items)} total items.")
+        
+        # Split into train and validation sets
+        val_size = int(len(valid_items) * self.validation_split)
+        train_size = len(valid_items) - val_size
+        
+        train_items, val_items = random_split(
+            valid_items, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)  # For reproducibility
+        )
+        
+        # Create dataset instances
+        self.train_dataset = MelSpectrogramDataset(
+            list(train_items), 
+            target_length=self.target_length, 
+            target_bins=self.target_bins
+        )
+        
+        self.val_dataset = MelSpectrogramDataset(
+            list(val_items), 
+            target_length=self.target_length, 
+            target_bins=self.target_bins
+        )
+        
+        print(f"Setup complete. Train dataset: {len(self.train_dataset)} items, "
+              f"Validation dataset: {len(self.val_dataset)} items")
+        
+    def train_dataloader(self):
+        """
+        Create the training dataloader.
+        
+        Returns:
+            DataLoader: Training dataloader
+        """
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            drop_last=True,
+            collate_fn=collate_fn
+        )
+        
+    def val_dataloader(self):
+        """
+        Create the validation dataloader.
+        
+        Returns:
+            DataLoader: Validation dataloader
+        """
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            collate_fn=collate_fn
+        )

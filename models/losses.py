@@ -22,9 +22,14 @@ class SpectralConvergenceLoss(nn.Module):
         Returns:
             Tensor: Spectral convergence loss
         """
-        # Calculate Frobenius norm (sqrt of sum of squared elements)
-        numerator = torch.norm(y_true - y_pred, p='fro', dim=(1, 2, 3))
-        denominator = torch.norm(y_true, p='fro', dim=(1, 2, 3))
+        # Reshape tensors to apply L2 norm
+        batch_size = y_true.shape[0]
+        y_true_flat = y_true.view(batch_size, -1)
+        y_pred_flat = y_pred.view(batch_size, -1)
+        
+        # Calculate L2 norm for each flattened spectrogram
+        numerator = torch.norm(y_true_flat - y_pred_flat, p=2, dim=1)
+        denominator = torch.norm(y_true_flat, p=2, dim=1)
         
         # Avoid division by zero
         loss = numerator / (denominator + 1e-8)

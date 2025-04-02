@@ -42,7 +42,7 @@ class Bottleneck(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(out_channels, in_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.bn2 = nn.BatchNorm2d(in_channels)  # Changed from out_channels to in_channels
         
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))

@@ -5,8 +5,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
-from models.unet_lightning import UNetLightning
-from data.data_module import MelSpectrogramDataModule
+from models.unet import UNet
+from data.mel_spectrogram_dataset import MelSpectrogramDataModule
 
 
 def main():

@@ -1,247 +1,135 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
-from torchvision.utils import make_grid
-import matplotlib.pyplot as plt
-from io import BytesIO
-import numpy as np
-import torchvision.transforms as T
 
-from models.unet import UNet
-from models.losses import CombinedLoss
-
-
-class UNetLightning(pl.LightningModule):
+class EncoderBlock(nn.Module):
     """
-    PyTorch Lightning module for U-Net mel-spectrogram reconstruction.
+    Encoder block for U-Net architecture.
+    
+    Each block consists of:
+    - Two Conv2D layers with BatchNorm and ReLU
+    - MaxPool for downsampling
     """
-    def __init__(self, config):
-        """
-        Initialize the Lightning module.
+    def __init__(self, in_channels, out_channels):
+        super(EncoderBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        Args:
-            config (dict): Configuration dictionary
-        """
-        super(UNetLightning, self).__init__()
-        self.save_hyperparameters()
-        self.config = config
-        
-        # Create U-Net model
-        self.model = UNet()
-        
-        # Loss function
-        self.criterion = CombinedLoss(
-            alpha=config['model'].get('loss_alpha', 0.8),
-            beta=config['model'].get('loss_beta', 0.2)
-        )
-        
-        # Metrics
-        self.train_loss = 0.0
-        self.val_loss = 0.0
-
     def forward(self, x):
-        """
-        Forward pass through the model.
+        # Store pre-pooled output for skip connection
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        skip = x  # Store for skip connection
+        x = self.pool(x)
+        return x, skip
+
+class Bottleneck(nn.Module):
+    """
+    Bottleneck block between encoder and decoder.
+    """
+    def __init__(self, in_channels, out_channels):
+        super(Bottleneck, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, in_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(in_channels)
         
-        Args:
-            x (Tensor): Input tensor
-            
-        Returns:
-            Tensor: Model output
-        """
-        return self.model(x)
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        return x
+
+class DecoderBlock(nn.Module):
+    """
+    Decoder block for U-Net architecture.
     
-    def training_step(self, batch, batch_idx):
-        """
-        Training step.
+    Each block consists of:
+    - TransposedConv2D for upsampling
+    - Concatenation with skip connection
+    - Two Conv2D layers with BatchNorm and ReLU
+    """
+    def __init__(self, in_channels, out_channels):
+        super(DecoderBlock, self).__init__()
+        self.up = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
+        self.conv1 = nn.Conv2d(in_channels*2, in_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(in_channels)
+        self.conv2 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
         
-        Args:
-            batch (Tensor): Input batch
-            batch_idx (int): Batch index
+    def forward(self, x, skip):
+        x = self.up(x)
+        
+        # Handle potential size mismatches
+        if x.shape[2] != skip.shape[2] or x.shape[3] != skip.shape[3]:
+            x = F.interpolate(x, size=(skip.shape[2], skip.shape[3]), mode='bilinear', align_corners=True)
             
-        Returns:
-            dict: Loss and log information
-        """
-        # Forward pass
-        output = self(batch)
-        loss = self.criterion(output, batch)
-        
-        # Log loss
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        
-        return {'loss': loss}
+        x = torch.cat([x, skip], dim=1)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        return x
+
+class UNet(nn.Module):
+    """
+    U-Net architecture for mel-spectrogram reconstruction.
     
-    def validation_step(self, batch, batch_idx):
-        """
-        Validation step.
+    Input: (B, 1, 128, 80) - Batch of mel-spectrograms
+    Output: (B, 1, 128, 80) - Reconstructed mel-spectrograms
+    """
+    def __init__(self):
+        super(UNet, self).__init__()
         
-        Args:
-            batch (Tensor): Input batch
-            batch_idx (int): Batch index
-            
-        Returns:
-            dict: Loss and visualization data
-        """
-        # Forward pass
-        output = self(batch)
-        loss = self.criterion(output, batch)
+        # Encoder path
+        self.enc1 = EncoderBlock(1, 16)
+        self.enc2 = EncoderBlock(16, 32)
+        self.enc3 = EncoderBlock(32, 64)
+        self.enc4 = EncoderBlock(64, 128)
         
-        # Log loss
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        # Bottleneck
+        self.bottleneck = Bottleneck(128, 256)
         
-        # Generate visualizations only for the first batch
-        if batch_idx == 0:
-            # Create visualizations for up to 4 samples in the batch
-            val_imgs = []
-            for i in range(min(4, batch.size(0))):
-                input_mel = batch[i].unsqueeze(0)  # Add batch dimension back
-                output_mel = output[i].unsqueeze(0)
-                
-                # Create comparison image
-                input_tensor, output_tensor, comparison_tensor = self.create_comparison_image(
-                    input_mel, output_mel
-                )
-                val_imgs.append((input_tensor, output_tensor, comparison_tensor))
-            
-            return {'loss': loss, 'val_imgs': val_imgs}
+        # Decoder path
+        self.dec1 = DecoderBlock(128, 64)
+        self.dec2 = DecoderBlock(64, 32)
+        self.dec3 = DecoderBlock(32, 16)
+        self.dec4 = DecoderBlock(16, 1)
         
-        return {'loss': loss}
-    
-    def validation_epoch_end(self, outputs):
-        """
-        Process validation epoch end.
+        # Final output layer
+        self.output = nn.Sigmoid()  # Ensure output is in [0,1] range
         
-        Args:
-            outputs (list): List of outputs from validation_step
-        """
-        # Check if we have visualization data
-        if outputs and 'val_imgs' in outputs[0]:
-            val_imgs = outputs[0]['val_imgs']
-            
-            # Log sample images
-            for i, (input_img, output_img, comparison_img) in enumerate(val_imgs):
-                # Log individual images
-                self.logger.experiment.add_image(
-                    f'Sample {i+1}/Input', 
-                    input_img, 
-                    self.current_epoch
-                )
-                self.logger.experiment.add_image(
-                    f'Sample {i+1}/Output', 
-                    output_img, 
-                    self.current_epoch
-                )
-                self.logger.experiment.add_image(
-                    f'Sample {i+1}/Comparison', 
-                    comparison_img, 
-                    self.current_epoch
-                )
-    
-    def configure_optimizers(self):
-        """
-        Configure optimizers and learning rate schedulers.
+        # Initialize weights
+        self._init_weights()
         
-        Returns:
-            dict: Optimizer and scheduler configuration
-        """
-        optimizer = torch.optim.Adam(
-            self.parameters(),
-            lr=self.config['train'].get('learning_rate', 0.001),
-            weight_decay=self.config['train'].get('weight_decay', 0.0001)
-        )
+    def _init_weights(self):
+        """Initialize weights using He normal initialization"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
         
-        scheduler_type = self.config['train'].get('lr_scheduler', 'reduce_on_plateau')
+    def forward(self, x):
+        # Encoder path
+        x, skip1 = self.enc1(x)
+        x, skip2 = self.enc2(x)
+        x, skip3 = self.enc3(x)
+        x, skip4 = self.enc4(x)
         
-        if scheduler_type == 'reduce_on_plateau':
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode='min',
-                factor=self.config['train'].get('lr_factor', 0.5),
-                patience=self.config['train'].get('lr_patience', 5),
-                verbose=True
-            )
-            return {
-                'optimizer': optimizer,
-                'lr_scheduler': {
-                    'scheduler': scheduler,
-                    'monitor': 'val_loss',
-                    'interval': 'epoch',
-                    'frequency': 1
-                }
-            }
-        else:
-            # Default to StepLR as fallback
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=30,
-                gamma=0.1
-            )
-            return {
-                'optimizer': optimizer,
-                'lr_scheduler': {
-                    'scheduler': scheduler,
-                    'interval': 'epoch',
-                    'frequency': 1
-                }
-            }
-    
-    def create_comparison_image(self, input_mel, output_mel):
-        """
-        Create a comparison image showing input and output mel spectrograms side by side.
+        # Bottleneck
+        x = self.bottleneck(x)
         
-        Args:
-            input_mel (torch.Tensor): Input mel spectrogram [1, T, F]
-            output_mel (torch.Tensor): Output (reconstructed) mel spectrogram [1, T, F]
-            
-        Returns:
-            tuple: (input_tensor, output_tensor, comparison_tensor) normalized image tensors
-                   in the format expected by TensorBoard (C, H, W)
-        """
-        # Convert to numpy arrays
-        input_np = input_mel.squeeze(0).cpu().numpy()
-        output_np = output_mel.squeeze(0).cpu().numpy()
+        # Decoder path with skip connections
+        x = self.dec1(x, skip4)
+        x = self.dec2(x, skip3)
+        x = self.dec3(x, skip2)
+        x = self.dec4(x, skip1)
         
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+        # Final output
+        x = self.output(x)
         
-        # Plot input spectrogram
-        im1 = ax1.imshow(input_np, aspect='auto', origin='lower', cmap='viridis')
-        ax1.set_title('Input Mel-Spectrogram')
-        ax1.set_ylabel('Mel Bins')
-        ax1.set_xlabel('Time Frames')
-        
-        # Plot output spectrogram
-        im2 = ax2.imshow(output_np, aspect='auto', origin='lower', cmap='viridis')
-        ax2.set_title('Reconstructed Mel-Spectrogram')
-        ax2.set_ylabel('Mel Bins')
-        ax2.set_xlabel('Time Frames')
-        
-        # Add colorbar
-        plt.colorbar(im1, ax=ax1, format='%+2.0f dB')
-        plt.colorbar(im2, ax=ax2, format='%+2.0f dB')
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        # Convert figure to image
-        buf = BytesIO()
-        plt.savefig(buf, format='png')
-        plt.close(fig)
-        buf.seek(0)
-        
-        # Convert to PIL Image and then to tensor
-        from PIL import Image
-        comparison_img = Image.open(buf)
-        to_tensor = T.ToTensor()
-        comparison_tensor = to_tensor(comparison_img)
-        
-        # Create separate input and output tensors for individual TensorBoard logging
-        # Normalize each tensor to [0, 1] for TensorBoard display
-        input_tensor = torch.from_numpy(input_np).unsqueeze(0)  # Add channel dimension
-        input_tensor = (input_tensor - input_tensor.min()) / (input_tensor.max() - input_tensor.min() + 1e-8)
-        
-        output_tensor = torch.from_numpy(output_np).unsqueeze(0)  # Add channel dimension
-        output_tensor = (output_tensor - output_tensor.min()) / (output_tensor.max() - output_tensor.min() + 1e-8)
-        
-        return input_tensor, output_tensor, comparison_tensor
+        return x

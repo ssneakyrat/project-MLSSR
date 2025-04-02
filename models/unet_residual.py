@@ -8,79 +8,11 @@ from PIL import Image
 import torchvision
 
 from models.losses import CombinedLoss
+from models.residual_blocks import EncoderBlockResidual, DecoderBlockResidual, BottleneckResidual
 
-class EncoderBlock(nn.Module):
+class UNetResidual(pl.LightningModule):
     """
-    Encoder block for U-Net architecture.
-    
-    Each block consists of:
-    - Two Conv2D layers with BatchNorm and ReLU
-    - MaxPool for downsampling
-    """
-    def __init__(self, in_channels, out_channels):
-        super(EncoderBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        
-    def forward(self, x):
-        # Store pre-pooled output for skip connection
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        skip = x  # Store for skip connection
-        x = self.pool(x)
-        return x, skip
-
-class Bottleneck(nn.Module):
-    """
-    Bottleneck block between encoder and decoder.
-    """
-    def __init__(self, in_channels, out_channels):
-        super(Bottleneck, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, in_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(in_channels)  # Changed from out_channels to in_channels
-        
-    def forward(self, x):
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        return x
-
-class DecoderBlock(nn.Module):
-    """
-    Decoder block for U-Net architecture.
-    
-    Each block consists of:
-    - TransposedConv2D for upsampling
-    - Concatenation with skip connection
-    - Two Conv2D layers with BatchNorm and ReLU
-    """
-    def __init__(self, in_channels, out_channels):
-        super(DecoderBlock, self).__init__()
-        self.up = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
-        self.conv1 = nn.Conv2d(in_channels*2, in_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(in_channels)
-        self.conv2 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-    def forward(self, x, skip):
-        x = self.up(x)
-        
-        # Handle potential size mismatches
-        if x.shape[2] != skip.shape[2] or x.shape[3] != skip.shape[3]:
-            x = F.interpolate(x, size=(skip.shape[2], skip.shape[3]), mode='bilinear', align_corners=True)
-        
-        x = torch.cat([x, skip], dim=1)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        return x
-
-class UNet(pl.LightningModule):
-    """
-    U-Net architecture for mel-spectrogram reconstruction.
+    U-Net architecture with residual connections for mel-spectrogram reconstruction.
     
     Input: (B, 1, 128, 80) - Batch of mel-spectrograms
     Output: (B, 1, 128, 80) - Reconstructed mel-spectrograms
@@ -167,11 +99,11 @@ class UNet(pl.LightningModule):
         self.encoder_blocks = nn.ModuleList()
         for i in range(self.layer_count):
             self.encoder_blocks.append(
-                EncoderBlock(self.encoder_channels[i], self.encoder_channels[i+1])
+                EncoderBlockResidual(self.encoder_channels[i], self.encoder_channels[i+1])
             )
         
         # Bottleneck
-        self.bottleneck = Bottleneck(self.encoder_channels[-1], self.bottleneck_channels)
+        self.bottleneck = BottleneckResidual(self.encoder_channels[-1], self.bottleneck_channels)
         
         # Create decoder blocks using ModuleList for dynamic layer count
         self.decoder_blocks = nn.ModuleList()
@@ -182,7 +114,7 @@ class UNet(pl.LightningModule):
                 in_channels = self.decoder_channels[i-1]
             
             self.decoder_blocks.append(
-                DecoderBlock(in_channels, self.decoder_channels[i])
+                DecoderBlockResidual(in_channels, self.decoder_channels[i])
             )
         
         # Final output layer

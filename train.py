@@ -5,15 +5,15 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
-from models.unet import UNet
+from models.unet_residual import UNetResidual
 from data.mel_spectrogram_dataset import MelSpectrogramDataModule, H5FileManager
 
 def main():
     """
-    Main function for training the U-Net model using PyTorch Lightning.
+    Main function for training the Residual U-Net model using PyTorch Lightning.
     """
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Train U-Net for mel spectrogram reconstruction using PyTorch Lightning')
+    parser = argparse.ArgumentParser(description='Train Residual U-Net for mel spectrogram reconstruction')
     parser.add_argument('--config', type=str, default='config/default.yaml',
                         help='Path to configuration file')
     parser.add_argument('--h5_path', type=str, default=None,
@@ -75,6 +75,7 @@ def main():
     
     # Get save directory from config if not provided
     save_dir = args.save_dir if args.save_dir is not None else config['train']['save_dir']
+    save_dir = os.path.join(save_dir, 'residual_unet')  # Add residual_unet subfolder
     
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
@@ -93,28 +94,27 @@ def main():
 
     # Define callbacks with separate directories for each ModelCheckpoint
     callbacks = [
-        # Save periodic checkpoints based on validation loss
+        # Save best model checkpoint
         ModelCheckpoint(
             monitor='val_loss',
-            filename='unet-{epoch:02d}-{val_loss:.6f}',
-            save_top_k=3,
+            filename='residual_unet-best',
+            save_top_k=1,
             mode='min',
-            save_last=True,
-            dirpath=periodic_checkpoint_dir,
+            dirpath=best_model_dir,
         ),
         # Monitor learning rate
         LearningRateMonitor(logging_interval='epoch'),
         # Early stopping
         EarlyStopping(
             monitor='val_loss',
-            patience=1000,#config['train'].get('lr_patience', 5) * 2,
+            patience=100,#config['train'].get('lr_patience', 5) * 2,
             mode='min',
-            verbose=True
+            verbose=False
         ),
     ]
     
     # Initialize the LightningModule
-    model = UNet(config)
+    model = UNetResidual(config)
     
     # Initialize the DataModule
     data_module = MelSpectrogramDataModule(config)
@@ -134,12 +134,12 @@ def main():
     )
     
     # Start training
-    print("Starting training with Lightning...")
+    print("Starting Residual U-Net training with Lightning...")
     trainer.fit(model, data_module, ckpt_path=args.resume)
     
     # Print information about the best model
-    print(f"Training completed. Best model saved at: {trainer.checkpoint_callback.best_model_path}")
-    print(f"Best validation loss: {trainer.checkpoint_callback.best_model_score:.6f}")
+    print(f"Training completed. Best model saved at: {best_model_dir}/residual_unet-best.ckpt")
+    print(f"Best validation loss: {trainer.callback_metrics.get('val_loss', 0):.6f}")
 
     # Clean up resources
     H5FileManager.get_instance().close_all()

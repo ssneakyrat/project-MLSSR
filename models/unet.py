@@ -206,8 +206,9 @@ class UNet(pl.LightningModule):
         l1_loss = F.l1_loss(y_pred, y)
         self.log('val_l1_loss', l1_loss, on_step=False, on_epoch=True, logger=True)
         
-        # Log validation images if it's the first batch of each epoch
-        if batch_idx == 0:
+        # Log validation images if it's the first batch and the current epoch is a multiple of val_every_epoch
+        val_every_epoch = self.config['validation'].get('val_every_epoch', 1)
+        if batch_idx == 0 and self.current_epoch % val_every_epoch == 0:
             self._log_validation_images(x, y_pred)
         
         return loss
@@ -220,14 +221,19 @@ class UNet(pl.LightningModule):
             inputs (torch.Tensor): Input mel spectrograms [B, 1, T, F]
             predictions (torch.Tensor): Predicted mel spectrograms [B, 1, T, F]
         """
-        # Select a few samples to visualize
-        num_samples = min(4, inputs.size(0))
+        # Select a few samples to visualize using max_samples from config
+        max_samples = self.config['validation'].get('max_samples', 5)
+        batch_size = inputs.size(0)
+        num_samples = min(max_samples, batch_size)
+        
+        # Generate random indices to select samples
+        indices = torch.randperm(batch_size)[:num_samples]
         
         # Create a figure for each sample
-        for i in range(num_samples):
-            # Get input and prediction
-            input_mel = inputs[i, 0].cpu().numpy()  # Shape: [T, F]
-            pred_mel = predictions[i, 0].cpu().numpy()  # Shape: [T, F]
+        for i, idx in enumerate(indices):
+            # Get input and prediction using random index
+            input_mel = inputs[idx, 0].cpu().numpy()  # Shape: [T, F]
+            pred_mel = predictions[idx, 0].cpu().numpy()  # Shape: [T, F]
             
             # Create figure
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))

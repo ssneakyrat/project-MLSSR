@@ -5,38 +5,6 @@ import torch
 from torch.utils.data import Dataset
 from utils.utils_general import load_config
 
-class BaseDataset(Dataset):
-    """
-    Base class for all datasets in the system.
-    """
-    def __init__(self, data_items):
-        """
-        Initialize the base dataset.
-        
-        Args:
-            data_items (list): List of data items from load_dataset
-        """
-        self.data_items = data_items
-    
-    def __len__(self):
-        """Return the number of items in the dataset."""
-        return len(self.data_items)
-    
-    def __getitem__(self, idx):
-        """
-        Get an item from the dataset.
-        
-        Args:
-            idx (int): Index of the item to retrieve
-        
-        Returns:
-            dict: Data item at the given index
-        """
-        # Base implementation simply returns the data item
-        # Subclasses should override this method to provide
-        # specific processing for the data
-        return self.data_items[idx]
-
 def test_load_data():
     """
     Test function to load data from a single h5 binary file and print 3 random sample file names.

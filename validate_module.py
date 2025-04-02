@@ -8,7 +8,7 @@ from PIL import Image
 import io
 import torchvision
 
-from data.datasets import load_dataset
+from utils.utils_datasets import load_dataset
 from utils.utils_general import load_config, plot_alignment
 
 def validate_dataset(config, log_dir='logs/validation', num_samples=4):

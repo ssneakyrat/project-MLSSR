@@ -71,3 +71,9 @@ train:
 validation:
   val_every_epoch: 10       # Log validation images every 5 epochs
   max_samples: 4           # Number of samples to visualize
+  
+  logging:
+    full_spectrum: true     # Log full spectrum input/output
+    individual_bands: false  # Log individual frequency band visualizations
+    merged_outputs: false    # Log band-merged and fused outputs
+    error_analysis: false    # Log frequency-band error analysis

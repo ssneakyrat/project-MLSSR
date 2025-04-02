@@ -5,7 +5,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils import load_config
-from models.multi_band_unet import MultiBandUNet  # Import our new model
+from models.multi_band_unet import MultiBandUNet
 from data.dataset import DataModule, H5FileManager
 
 def main():
@@ -20,12 +20,30 @@ def main():
     parser.add_argument('--num_bands', type=int, default=None, help='Number of frequency bands (overrides config)')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training from')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    
+    # Add new arguments for visualization toggles
+    parser.add_argument('--log_full', type=str, default=None, choices=['true', 'false'], 
+                        help='Enable/disable full spectrum logging (overrides config)')
+    parser.add_argument('--log_bands', type=str, default=None, choices=['true', 'false'], 
+                        help='Enable/disable individual band logging (overrides config)')
+    parser.add_argument('--log_merged', type=str, default=None, choices=['true', 'false'], 
+                        help='Enable/disable merged outputs logging (overrides config)')
+    parser.add_argument('--log_error', type=str, default=None, choices=['true', 'false'], 
+                        help='Enable/disable error analysis logging (overrides config)')
+    
     args = parser.parse_args()
     
     pl.seed_everything(args.seed)
     
     config = load_config(args.config)
     
+    # Ensure validation logging section exists
+    if 'validation' not in config:
+        config['validation'] = {}
+    if 'logging' not in config['validation']:
+        config['validation']['logging'] = {}
+    
+    # Apply command line overrides for standard parameters
     if args.batch_size:
         config['train']['batch_size'] = args.batch_size
         
@@ -46,6 +64,19 @@ def main():
     
     if args.num_bands:
         config['model']['num_freq_bands'] = args.num_bands
+    
+    # Apply command line overrides for visualization toggles
+    if args.log_full:
+        config['validation']['logging']['full_spectrum'] = args.log_full.lower() == 'true'
+    
+    if args.log_bands:
+        config['validation']['logging']['individual_bands'] = args.log_bands.lower() == 'true'
+    
+    if args.log_merged:
+        config['validation']['logging']['merged_outputs'] = args.log_merged.lower() == 'true'
+    
+    if args.log_error:
+        config['validation']['logging']['error_analysis'] = args.log_error.lower() == 'true'
     
     save_dir = args.save_dir or config['train']['save_dir']
     os.makedirs(save_dir, exist_ok=True)

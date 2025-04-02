@@ -32,6 +32,11 @@ def main():
                         help='Path to checkpoint to resume training from')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')
+    # Add dataset subset arguments
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='Maximum number of samples to use from dataset (overrides config)')
+    parser.add_argument('--sample_percentage', type=float, default=None,
+                        help='Percentage of dataset to use (0.0-1.0, overrides config)')
     args = parser.parse_args()
     
     # Set random seed for reproducibility
@@ -60,6 +65,13 @@ def main():
     
     if args.data_key is not None:
         config['data']['data_key'] = args.data_key
+    
+    # Override dataset subset settings if provided
+    if args.max_samples is not None:
+        config['data']['max_samples'] = args.max_samples
+    
+    if args.sample_percentage is not None:
+        config['data']['sample_percentage'] = args.sample_percentage
     
     # Get save directory from config if not provided
     save_dir = args.save_dir if args.save_dir is not None else config['train']['save_dir']
@@ -95,7 +107,7 @@ def main():
         # Early stopping
         EarlyStopping(
             monitor='val_loss',
-            patience=config['train'].get('lr_patience', 5) * 2,
+            patience=1000,#config['train'].get('lr_patience', 5) * 2,
             mode='min',
             verbose=True
         ),

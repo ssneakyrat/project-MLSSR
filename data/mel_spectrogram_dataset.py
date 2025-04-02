@@ -150,6 +150,10 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
         # Lazy loading setting - default to True for multi-worker dataloaders
         self.lazy_load = config['data'].get('lazy_load', self.num_workers == 0)
         
+        # Dataset subset settings
+        self.max_samples = config['data'].get('max_samples', None)
+        self.sample_percentage = config['data'].get('sample_percentage', None)
+        
         # Track dataset instances
         self.dataset = None
         self.train_dataset = None
@@ -175,9 +179,33 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
                 lazy_load=self.lazy_load
             )
             
+            # Apply dataset subsetting if requested
+            full_dataset_size = len(self.dataset)
+            subset_size = full_dataset_size
+            
+            # Priority: max_samples takes precedence over sample_percentage
+            if self.max_samples is not None and self.max_samples > 0:
+                subset_size = min(self.max_samples, full_dataset_size)
+            elif self.sample_percentage is not None and 0.0 < self.sample_percentage <= 1.0:
+                subset_size = int(full_dataset_size * self.sample_percentage)
+            
+            # Create a subset if needed
+            if subset_size < full_dataset_size:
+                print(f"Creating dataset subset: {subset_size}/{full_dataset_size} samples ({subset_size/full_dataset_size:.1%})")
+                
+                # Create a generator with fixed seed for reproducibility
+                generator = torch.Generator().manual_seed(42)
+                
+                # Get indices for the subset
+                indices = torch.randperm(full_dataset_size, generator=generator)[:subset_size].tolist()
+                
+                # Create a Subset dataset
+                self.dataset = torch.utils.data.Subset(self.dataset, indices)
+            
             # Split into train and validation sets
-            val_size = int(len(self.dataset) * self.validation_split)
-            train_size = len(self.dataset) - val_size
+            dataset_size = len(self.dataset)
+            val_size = int(dataset_size * self.validation_split)
+            train_size = dataset_size - val_size
             
             # Create a generator with fixed seed for reproducibility
             generator = torch.Generator().manual_seed(42)

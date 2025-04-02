@@ -118,7 +118,8 @@ class H5DataModule(pl.LightningDataModule):
     """
     def __init__(self, h5_path, data_key, label_key=None, batch_size=32, 
                  validation_split=0.2, test_split=0.0, transform=None,
-                 num_workers=4, pin_memory=True, lazy_load=True):
+                 num_workers=4, pin_memory=True, lazy_load=True,
+                 max_samples=None, sample_percentage=None):
         """
         Initialize the data module.
         
@@ -133,6 +134,8 @@ class H5DataModule(pl.LightningDataModule):
             num_workers (int): Number of workers for data loading
             pin_memory (bool): Whether to pin memory for faster GPU transfer
             lazy_load (bool): Whether to use lazy loading or load everything in memory
+            max_samples (int, optional): Maximum number of samples to use from dataset
+            sample_percentage (float, optional): Percentage of dataset to use (0.0-1.0)
         """
         super().__init__()
         self.h5_path = h5_path
@@ -145,6 +148,8 @@ class H5DataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.lazy_load = lazy_load
+        self.max_samples = max_samples
+        self.sample_percentage = sample_percentage
         
         # Initialize datasets to None
         self.dataset = None
@@ -173,6 +178,29 @@ class H5DataModule(pl.LightningDataModule):
                 self.transform,
                 self.lazy_load
             )
+            
+            # Apply dataset subsetting if requested
+            full_dataset_size = len(self.dataset)
+            subset_size = full_dataset_size
+            
+            # Priority: max_samples takes precedence over sample_percentage
+            if self.max_samples is not None and self.max_samples > 0:
+                subset_size = min(self.max_samples, full_dataset_size)
+            elif self.sample_percentage is not None and 0.0 < self.sample_percentage <= 1.0:
+                subset_size = int(full_dataset_size * self.sample_percentage)
+            
+            # Create a subset if needed
+            if subset_size < full_dataset_size:
+                print(f"Creating dataset subset: {subset_size}/{full_dataset_size} samples ({subset_size/full_dataset_size:.1%})")
+                
+                # Create a generator with fixed seed for reproducibility
+                generator = torch.Generator().manual_seed(42)
+                
+                # Get indices for the subset
+                indices = torch.randperm(full_dataset_size, generator=generator)[:subset_size].tolist()
+                
+                # Create a Subset dataset
+                self.dataset = torch.utils.data.Subset(self.dataset, indices)
             
             # Calculate split sizes
             dataset_size = len(self.dataset)

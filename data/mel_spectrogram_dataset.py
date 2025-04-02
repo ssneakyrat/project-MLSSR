@@ -1,122 +1,92 @@
-import os
-import numpy as np
-import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import Dataset
+import numpy as np
 
-from utils.utils_datasets import load_dataset
-from data.mel_spectrogram_dataset import MelSpectrogramDataset, collate_fn
+from utils.utils_transform import normalize_mel_spectrogram, pad_or_truncate_mel
 
-
-class MelSpectrogramDataModule(pl.LightningDataModule):
+class MelSpectrogramDataset(Dataset):
     """
-    PyTorch Lightning DataModule for the Mel Spectrogram reconstruction task.
+    Dataset for mel spectrogram reconstruction.
     """
-    def __init__(self, config):
+    def __init__(self, data_items, target_length=128, target_bins=80):
         """
-        Initialize the DataModule.
+        Initialize the dataset.
         
         Args:
-            config (dict): Configuration dictionary
+            data_items (list): List of data items from load_dataset()
+            target_length (int): Target number of time frames
+            target_bins (int): Target number of mel bins
         """
-        super().__init__()
-        self.config = config
-        self.batch_size = config['train'].get('batch_size', 32)
-        self.num_workers = config['train'].get('num_workers', 4)
-        self.pin_memory = config['train'].get('pin_memory', True)
-        self.validation_split = config['train'].get('validation_split', 0.1)
+        self.data_items = data_items
+        self.target_length = target_length
+        self.target_bins = target_bins
         
-        # For storing dataset splits
-        self.train_dataset = None
-        self.val_dataset = None
-        self.data_items = None
-    
-    def prepare_data(self):
-        """
-        Perform operations that should be done only once and 
-        can be done in a non-distributed setting (e.g., download data).
+        # Filter out items that don't have mel spectrograms
+        self.valid_items = []
+        for item in data_items:
+            if 'mel_spec' in item and item['mel_spec'] is not None:
+                self.valid_items.append(item)
         
-        Note: This method is called only once and on only one GPU.
-        """
-        # Nothing to do here since we assume data is already preprocessed
-        pass
+        if len(self.valid_items) == 0:
+            raise ValueError("No valid items with mel spectrograms found in the dataset")
     
-    def setup(self, stage=None):
+    def __len__(self):
         """
-        Perform operations to setup the data for training/validation.
+        Get the number of items in the dataset.
+        
+        Returns:
+            int: Number of items
+        """
+        return len(self.valid_items)
+    
+    def __getitem__(self, idx):
+        """
+        Get an item from the dataset.
         
         Args:
-            stage (str): Either 'fit', 'validate', 'test', or 'predict'
-        """
-        if stage == 'fit' or stage is None:
-            # Load dataset
-            print("Loading dataset...")
-            self.data_items = load_dataset(split='train', shuffle=True)
-            print(f"Loaded {len(self.data_items)} samples")
+            idx (int): Index
             
-            # Check if at least one sample contains mel spectrogram
-            has_mel = any('mel_spec' in item for item in self.data_items)
-            if not has_mel:
-                raise ValueError("Error: No mel spectrograms found in the dataset")
-            
-            # Split data into training and validation sets
-            num_val = int(len(self.data_items) * self.validation_split)
-            num_train = len(self.data_items) - num_val
-            
-            # Create indices for random splitting
-            indices = list(range(len(self.data_items)))
-            np.random.shuffle(indices)
-            
-            train_indices = indices[num_val:]
-            val_indices = indices[:num_val]
-            
-            train_data = [self.data_items[i] for i in train_indices]
-            val_data = [self.data_items[i] for i in val_indices]
-            
-            # Create datasets
-            self.train_dataset = MelSpectrogramDataset(
-                train_data,
-                target_length=self.config['model'].get('time_frames', 128),
-                target_bins=self.config['model'].get('mel_bins', 80)
-            )
-            
-            self.val_dataset = MelSpectrogramDataset(
-                val_data,
-                target_length=self.config['model'].get('time_frames', 128),
-                target_bins=self.config['model'].get('mel_bins', 80)
-            )
-            
-            print(f"Training samples: {len(self.train_dataset)}")
-            print(f"Validation samples: {len(self.val_dataset)}")
-    
-    def train_dataloader(self):
-        """
-        Create the training dataloader.
-        
         Returns:
-            DataLoader: Training dataloader
+            torch.Tensor: Processed mel spectrogram tensor of shape [1, T, F]
+                         where T is target_length and F is target_bins
         """
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            collate_fn=collate_fn,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory
-        )
-    
-    def val_dataloader(self):
-        """
-        Create the validation dataloader.
+        # Get the data item
+        item = self.valid_items[idx]
         
-        Returns:
-            DataLoader: Validation dataloader
-        """
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory
-        )
+        # Get mel spectrogram
+        mel_spec = item['mel_spec']
+        
+        # Ensure mel_spec is in the right orientation (F, T)
+        if mel_spec.shape[0] < mel_spec.shape[1]:
+            # If time is second dimension (longer), no need to transpose
+            pass
+        else:
+            # If time is first dimension, transpose
+            mel_spec = mel_spec.T
+        
+        # Normalize
+        mel_spec = normalize_mel_spectrogram(mel_spec)
+        
+        # Pad or truncate
+        mel_spec = pad_or_truncate_mel(mel_spec, self.target_length, self.target_bins)
+        
+        # Convert to tensor and add channel dimension
+        mel_tensor = torch.from_numpy(mel_spec).float()
+        
+        # Reshape to [1, F, T] for 2D convolution (batch, channels, height, width)
+        mel_tensor = mel_tensor.unsqueeze(0)
+        
+        return mel_tensor
+
+def collate_fn(batch):
+    """
+    Custom collate function.
+    
+    Args:
+        batch (list): List of tensors
+        
+    Returns:
+        torch.Tensor: Batch tensor
+    """
+    # Simply stack tensors along the batch dimension
+    return torch.stack(batch, dim=0)

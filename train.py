@@ -5,7 +5,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
-from models.unet import UNet
+from models.unet_lightning import UNetLightning
 from data.mel_spectrogram_dataset import MelSpectrogramDataModule
 
 
@@ -17,8 +17,8 @@ def main():
     parser = argparse.ArgumentParser(description='Train U-Net for mel spectrogram reconstruction using PyTorch Lightning')
     parser.add_argument('--config', type=str, default='config/default.yaml',
                         help='Path to configuration file')
-    parser.add_argument('--save_dir', type=str, default='runs/unet_lightning',
-                        help='Directory to save checkpoints and logs')
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help='Directory to save checkpoints and logs (overrides config)')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='Batch size (overrides config)')
     parser.add_argument('--epochs', type=int, default=None,
@@ -47,12 +47,15 @@ def main():
     if args.val_split is not None:
         config['train']['validation_split'] = args.val_split
     
+    # Get save directory from config if not provided
+    save_dir = args.save_dir if args.save_dir is not None else config['train']['save_dir']
+    
     # Create save directory
-    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
     
     # Create TensorBoard logger
     logger = TensorBoardLogger(
-        save_dir=args.save_dir,
+        save_dir=save_dir,
         name='lightning_logs'
     )
     

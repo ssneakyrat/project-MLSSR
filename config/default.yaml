@@ -49,8 +49,8 @@ train:
   lr_patience: 5
   lr_factor: 0.5
   validation_split: 0.1
-  log_interval: 10
-  save_interval: 10
+  log_interval: 100
+  save_interval: 100
   save_dir: logs/unet
   
   # Hardware
@@ -59,4 +59,5 @@ train:
   
 # Validation settings
 validation:
+  val_every_epoch: 10
   max_samples: 5  # Maximum number of samples to visualize

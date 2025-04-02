@@ -205,7 +205,8 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=True,
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
+            persistent_workers=True
         )
         
     def val_dataloader(self):
@@ -221,7 +222,8 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
+            persistent_workers=True
         )
         
     def teardown(self, stage=None):

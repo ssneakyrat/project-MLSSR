@@ -8,11 +8,12 @@ from PIL import Image
 import torchvision
 
 from models.losses import CombinedLoss
-from models.residual_blocks import EncoderBlockResidual, DecoderBlockResidual, BottleneckResidual
+from models.residual_blocks import EncoderBlockResidual, DecoderBlockResidual, DilatedBottleneck
 
 class UNetResidual(pl.LightningModule):
     """
-    U-Net architecture with residual connections for mel-spectrogram reconstruction.
+    Enhanced U-Net architecture with residual connections and dilated bottleneck
+    with self-attention for mel-spectrogram reconstruction.
     
     Input: (B, 1, 128, 80) - Batch of mel-spectrograms
     Output: (B, 1, 128, 80) - Reconstructed mel-spectrograms
@@ -102,8 +103,8 @@ class UNetResidual(pl.LightningModule):
                 EncoderBlockResidual(self.encoder_channels[i], self.encoder_channels[i+1])
             )
         
-        # Bottleneck
-        self.bottleneck = BottleneckResidual(self.encoder_channels[-1], self.bottleneck_channels)
+        # Bottleneck - Use the new DilatedBottleneck with attention
+        self.bottleneck = DilatedBottleneck(self.encoder_channels[-1], self.bottleneck_channels)
         
         # Create decoder blocks using ModuleList for dynamic layer count
         self.decoder_blocks = nn.ModuleList()

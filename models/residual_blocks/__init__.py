@@ -1,1 +1,1 @@
-from .residual_blocks import EncoderBlockResidual, DecoderBlockResidual, BottleneckResidual
+from .residual_blocks import EncoderBlockResidual, DecoderBlockResidual, BottleneckResidual, SelfAttention, DilatedBottleneck

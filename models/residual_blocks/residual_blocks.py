@@ -146,3 +146,91 @@ class DecoderBlockResidual(nn.Module):
         x = F.relu(x + residual)
         
         return x
+
+class SelfAttention(nn.Module):
+    """
+    Self-Attention module for feature refinement.
+    
+    Applies self-attention to the input tensor, allowing the model to focus
+    on important regions and capture long-range dependencies.
+    """
+    def __init__(self, in_channels):
+        super(SelfAttention, self).__init__()
+        self.query = nn.Conv2d(in_channels, in_channels//8, 1)
+        self.key = nn.Conv2d(in_channels, in_channels//8, 1)
+        self.value = nn.Conv2d(in_channels, in_channels, 1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        
+    def forward(self, x):
+        batch_size, C, width, height = x.size()
+        
+        # Reshape for matrix multiplication
+        proj_query = self.query(x).view(batch_size, -1, width*height).permute(0, 2, 1)
+        proj_key = self.key(x).view(batch_size, -1, width*height)
+        
+        # Attention map
+        attention = F.softmax(torch.bmm(proj_query, proj_key), dim=-1)
+        
+        proj_value = self.value(x).view(batch_size, -1, width*height)
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))
+        out = out.view(batch_size, C, width, height)
+        
+        # Residual connection with learnable weight
+        return self.gamma * out + x
+
+
+class DilatedBottleneck(nn.Module):
+    """
+    Enhanced bottleneck block with dilated convolutions and self-attention.
+    
+    Uses parallel dilated convolutions with different dilation rates to increase
+    the receptive field without increasing the number of parameters, followed by
+    self-attention to capture long-range dependencies.
+    """
+    def __init__(self, in_channels, out_channels):
+        super(DilatedBottleneck, self).__init__()
+        # Initial convolution
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        
+        # Dilated convolutions with different rates (on out_channels)
+        self.dil1 = nn.Conv2d(out_channels, out_channels//4, 3, padding=1, dilation=1)
+        self.dil2 = nn.Conv2d(out_channels, out_channels//4, 3, padding=2, dilation=2)
+        self.dil3 = nn.Conv2d(out_channels, out_channels//4, 3, padding=4, dilation=4)
+        self.dil4 = nn.Conv2d(out_channels, out_channels//4, 3, padding=8, dilation=8)
+        
+        # Combine dilated outputs and map back to input size for residual connection
+        self.bn_dil = nn.BatchNorm2d(out_channels)
+        self.conv_out = nn.Conv2d(out_channels, in_channels, kernel_size=1)
+        self.bn_out = nn.BatchNorm2d(in_channels)
+        
+        # Add self-attention module
+        self.attention = SelfAttention(in_channels)
+        
+    def forward(self, x):
+        # Store input for residual connection
+        residual = x
+        
+        # First convolution: in_channels -> out_channels
+        x = F.relu(self.bn1(self.conv1(x)))
+        
+        # Parallel dilated convolutions with different receptive fields
+        d1 = F.relu(self.dil1(x))
+        d2 = F.relu(self.dil2(x))
+        d3 = F.relu(self.dil3(x))
+        d4 = F.relu(self.dil4(x))
+        
+        # Concatenate outputs to reform out_channels
+        out = torch.cat([d1, d2, d3, d4], dim=1)
+        out = F.relu(self.bn_dil(out))
+        
+        # Map back to in_channels for residual connection
+        out = self.bn_out(self.conv_out(out))
+        
+        # Apply residual connection
+        out = F.relu(out + residual)
+        
+        # Apply self-attention for global context modeling
+        out = self.attention(out)
+        
+        return out

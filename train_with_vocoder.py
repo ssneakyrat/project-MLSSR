@@ -28,6 +28,9 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training from')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     
+    parser.add_argument('--single_process', action='store_true', 
+                    help='Disable multiprocessing for data loading (fixes H5py issues)')
+    
     # Add arguments for vocoder control
     parser.add_argument('--disable_vocoder', action='store_true', help='Disable vocoder training and use U-Net only')
     parser.add_argument('--vocoder_weights', type=float, default=None, help='Weight for vocoder loss (overrides config)')
@@ -78,6 +81,10 @@ def main():
     if args.max_samples:
         config['data']['max_samples'] = args.max_samples
     
+    if args.single_process:
+        print("Forcing single process mode for data loading")
+        config['train']['num_workers'] = 0
+
     # Set variable length mode
     if args.variable_length:
         config['data']['variable_length'] = True
@@ -181,18 +188,30 @@ def main():
     # Adjust trainer settings
     use_16bit = config['train'].get('precision', '32-true') == '16-mixed'
     
-    trainer = pl.Trainer(
-        max_epochs=config['train']['num_epochs'],
-        logger=logger,
-        callbacks=callbacks,
-        log_every_n_steps=config['train'].get('log_interval', 10),
-        deterministic=config.get('train', {}).get('deterministic', False),  # Set to False for better performance
-        accelerator='auto',
-        devices='auto',
-        precision=config['train'].get('precision', '32-true'),
-        benchmark=True,  # Enable cudnn benchmarking for faster training
-        accumulate_grad_batches=config['train'].get('accumulate_grad_batches', 1)
-    )
+    # Set up trainer kwargs
+    trainer_kwargs = {
+        'max_epochs': config['train']['num_epochs'],
+        'logger': logger,
+        'callbacks': callbacks,
+        'log_every_n_steps': config['train'].get('log_interval', 10),
+        'deterministic': config.get('train', {}).get('deterministic', False),
+        'accelerator': 'auto',
+        'devices': 'auto',
+        'precision': config['train'].get('precision', '32-true'),
+        'benchmark': True,  # Enable cudnn benchmarking for faster training
+    }
+    
+    # Only add gradient accumulation for automatic optimization (U-Net only mode)
+    if not vocoder_enabled and 'accumulate_grad_batches' in config['train']:
+        trainer_kwargs['accumulate_grad_batches'] = config['train']['accumulate_grad_batches']
+        print(f"  - Gradient accumulation: {config['train']['accumulate_grad_batches']} batches")
+    elif vocoder_enabled and 'accumulate_grad_batches' in config['train']:
+        print(f"  - Note: Automatic gradient accumulation disabled for manual optimization with vocoder")
+        print(f"    Original accumulate_grad_batches value: {config['train']['accumulate_grad_batches']}")
+        print(f"    Consider adjusting batch size to compensate")
+    
+    # Create trainer with appropriate settings
+    trainer = pl.Trainer(**trainer_kwargs)
     
     try:
         trainer.fit(model, data_module, ckpt_path=args.resume)

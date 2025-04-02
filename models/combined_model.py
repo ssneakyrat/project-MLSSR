@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import soundfile as sf
 import librosa
-import wandb
 
 from models.multi_band_unet import MultiBandUNet
 from models.hifi_gan import Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator
@@ -23,11 +22,18 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
         self.config = config
         self.save_hyperparameters()
         
+        # Set manual optimization for multiple optimizers
+        self.automatic_optimization = False
+        
         # Initialize U-Net model
         self.unet = MultiBandUNet(config)
         
         # Initialize HiFi-GAN components if vocoder is enabled
         self.vocoder_enabled = config.get('vocoder', {}).get('enabled', False)
+        
+        # Set up manual gradient accumulation
+        self.accumulate_grad_batches = config['train'].get('accumulate_grad_batches', 1)
+        self.current_accumulation_step = 0
         
         if self.vocoder_enabled:
             self._init_vocoder(config)
@@ -71,6 +77,9 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             print(f"HiFi-GAN Generator parameters: {gen_params:,}")
             print(f"HiFi-GAN Discriminator parameters: {disc_params:,}")
             print(f"Total parameters: {unet_params + gen_params + disc_params:,}")
+            
+            if self.accumulate_grad_batches > 1:
+                print(f"Using manual gradient accumulation with {self.accumulate_grad_batches} steps")
         else:
             print("Running in mel-spectrogram-only mode (vocoder disabled)")
             # Count only U-Net parameters
@@ -159,148 +168,151 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
         
         return result
     
-    def training_step(self, batch, batch_idx, optimizer_idx=None):
+    def training_step(self, batch, batch_idx):
         """
-        Training step supporting both U-Net and HiFi-GAN training
+        Training step with manual optimization and gradient accumulation
         
         Args:
             batch: Input batch which is either:
-                  - mel_spec [B, 1, F, T] (if vocoder disabled)
-                  - (mel_spec [B, 1, F, T], audio [B, 1, T']) (if vocoder enabled)
+                - mel_spec [B, 1, F, T] (if vocoder disabled)
+                - (mel_spec [B, 1, F, T], audio [B, 1, T']) (if vocoder enabled)
             batch_idx: Batch index
-            optimizer_idx: Which optimizer to use
-                          - None if vocoder disabled
-                          - 0 for U-Net and Generator
-                          - 1 for Discriminators
         """
         self.train_step_idx += 1
         
+        # Update accumulation step counter
+        self.current_accumulation_step = (self.current_accumulation_step + 1) % self.accumulate_grad_batches
+        is_last_accumulation_step = (self.current_accumulation_step == 0) or (self.current_accumulation_step == self.accumulate_grad_batches)
+        
+        # Calculate normalization factor for loss when accumulating gradients
+        accumulation_factor = 1.0 / self.accumulate_grad_batches if self.accumulate_grad_batches > 1 else 1.0
+        
         if not self.vocoder_enabled:
-            # Standard U-Net training
-            return self._training_step_unet_only(batch, batch_idx)
+            # Standard U-Net training with single optimizer
+            opt = self.optimizers()
+            
+            # Forward pass
+            mel_input = batch
+            y_pred = self(mel_input)
+            mel_output = y_pred['mel_output']
+            
+            # Loss calculation with normalization factor
+            loss = self.unet.loss_fn(mel_output, mel_input) * accumulation_factor
+            
+            # Manual gradient accumulation and optimization
+            self.manual_backward(loss)
+            
+            # Only update weights on the last accumulation step
+            if is_last_accumulation_step:
+                opt.step()
+                opt.zero_grad()
+            
+            # Log metrics
+            self.log('train_loss', loss / accumulation_factor, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+            
+            return loss
         else:
-            # Joint training with HiFi-GAN
+            # Joint training with multiple optimizers (generator and discriminator)
+            # Get optimizers
+            opt_g, opt_d = self.optimizers()
+            
+            # Handle input data format
             if isinstance(batch, tuple) or isinstance(batch, list):
                 mel_input, audio_target = batch
             else:
                 # This should not happen in vocoder mode
-                mel_input = batch
-                audio_target = None
                 print(f"Warning: Expected tuple/list batch in vocoder mode, got {type(batch)}")
-                # Fallback to U-Net only
-                return self._training_step_unet_only(mel_input, batch_idx)
+                return None
             
-            # Check if we need to skip discriminator training based on step
-            if optimizer_idx == 1 and self.train_step_idx < self.disc_start_step:
-                # Return dummy loss
-                return torch.tensor(0.0, requires_grad=True, device=self.device)
+            # ========== Step 1: Train Generator (U-Net + HiFi-GAN Generator) ==========
+            # Only train generator on specified intervals
+            if (self.train_step_idx % self.generator_train_every) == 0:
+                # Forward pass for generator
+                outputs = self(mel_input)
+                mel_output = outputs['mel_output']
+                audio_output = outputs['audio_output']
+                
+                # U-Net loss
+                unet_loss = self.unet.loss_fn(mel_output, mel_input)
+                
+                # Run discriminators on generated audio
+                mpd_fake_feat_maps, mpd_fake_scores = self.mpd(audio_output)
+                msd_fake_feat_maps, msd_fake_scores = self.msd(audio_output)
+                
+                # Get feature maps from real audio
+                with torch.no_grad():
+                    mpd_real_feat_maps, _ = self.mpd(audio_target)
+                    msd_real_feat_maps, _ = self.msd(audio_target)
+                
+                # Combine feature maps and scores
+                real_feat_maps = mpd_real_feat_maps + msd_real_feat_maps
+                fake_feat_maps = mpd_fake_feat_maps + msd_fake_feat_maps
+                fake_scores = mpd_fake_scores + msd_fake_scores
+                
+                # Calculate generator losses
+                gen_loss, gen_losses_dict = self.hifi_loss.generator_loss(
+                    fake_scores, real_feat_maps, fake_feat_maps, audio_target, audio_output
+                )
+                
+                # Combine losses with weights from config
+                unet_weight = self.config.get('vocoder', {}).get('unet_weight', 1.0)
+                vocoder_weight = self.config.get('vocoder', {}).get('vocoder_weight', 1.0)
+                total_g_loss = (unet_weight * unet_loss + vocoder_weight * gen_loss) * accumulation_factor
+                
+                # Manual backward pass for gradient accumulation
+                self.manual_backward(total_g_loss)
+                
+                # Only update weights on the last accumulation step
+                if is_last_accumulation_step:
+                    opt_g.step()
+                    opt_g.zero_grad()
+                
+                # Log metrics (unscaled)
+                self.log('train_unet_loss', unet_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+                self.log('train_gen_loss', gen_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+                self.log('train_total_g_loss', total_g_loss / accumulation_factor, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+                
+                for k, v in gen_losses_dict.items():
+                    self.log(f'train_{k}', v, on_step=False, on_epoch=True, logger=True)
             
-            # Check training schedule
-            if optimizer_idx == 0:  # U-Net + Generator
-                if (self.train_step_idx % self.generator_train_every) != 0:
-                    return torch.tensor(0.0, requires_grad=True, device=self.device)
-                return self._training_step_generator(mel_input, audio_target, batch_idx)
-            elif optimizer_idx == 1:  # Discriminator
-                if (self.train_step_idx % self.discriminator_train_every) != 0:
-                    return torch.tensor(0.0, requires_grad=True, device=self.device)
-                return self._training_step_discriminator(mel_input, audio_target, batch_idx)
-            else:
-                raise ValueError(f"Invalid optimizer_idx: {optimizer_idx}")
-    
-    def _training_step_unet_only(self, mel_input, batch_idx):
-        """U-Net only training step (no vocoder)"""
-        # Forward pass through U-Net
-        outputs = self(mel_input)
-        mel_output = outputs['mel_output']
-        
-        # Calculate U-Net loss
-        loss = self.unet.loss_fn(mel_output, mel_input)
-        
-        # Log metrics
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        
-        return loss
-    
-    def _training_step_generator(self, mel_input, audio_target, batch_idx):
-        """Generator training step (U-Net + HiFi-GAN Generator)"""
-        # Forward pass through both models
-        outputs = self(mel_input)
-        mel_output = outputs['mel_output']
-        audio_output = outputs['audio_output']
-        
-        # U-Net mel reconstruction loss
-        unet_loss = self.unet.loss_fn(mel_output, mel_input)
-        
-        # Run discriminators on real and generated audio
-        with torch.no_grad():
-            # MPD
-            mpd_real_feat_maps, mpd_real_scores = self.mpd(audio_target)
-            
-            # MSD
-            msd_real_feat_maps, msd_real_scores = self.msd(audio_target)
-        
-        # Discriminate generated audio
-        mpd_fake_feat_maps, mpd_fake_scores = self.mpd(audio_output)
-        msd_fake_feat_maps, msd_fake_scores = self.msd(audio_output)
-        
-        # Combine feature maps and scores from both discriminators
-        real_feat_maps = mpd_real_feat_maps + msd_real_feat_maps
-        fake_feat_maps = mpd_fake_feat_maps + msd_fake_feat_maps
-        
-        fake_scores = mpd_fake_scores + msd_fake_scores
-        
-        # Calculate generator losses
-        gen_loss, gen_losses_dict = self.hifi_loss.generator_loss(
-            fake_scores, real_feat_maps, fake_feat_maps, audio_target, audio_output
-        )
-        
-        # Combine U-Net and generator losses
-        # Use a weighting factor (can be adjusted in config)
-        unet_weight = self.config.get('vocoder', {}).get('unet_weight', 1.0)
-        vocoder_weight = self.config.get('vocoder', {}).get('vocoder_weight', 1.0)
-        
-        total_loss = unet_weight * unet_loss + vocoder_weight * gen_loss
-        
-        # Log metrics
-        self.log('train_unet_loss', unet_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_gen_loss', gen_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_total_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        
-        for k, v in gen_losses_dict.items():
-            self.log(f'train_{k}', v, on_step=False, on_epoch=True, logger=True)
-        
-        return total_loss
-    
-    def _training_step_discriminator(self, mel_input, audio_target, batch_idx):
-        """Discriminator training step"""
-        # Generate audio without gradients for discriminator training
-        with torch.no_grad():
-            outputs = self(mel_input)
-            audio_output = outputs['audio_output']
-        
-        # MPD
-        mpd_real_feat_maps, mpd_real_scores = self.mpd(audio_target)
-        mpd_fake_feat_maps, mpd_fake_scores = self.mpd(audio_output.detach())
-        
-        # MSD
-        msd_real_feat_maps, msd_real_scores = self.msd(audio_target)
-        msd_fake_feat_maps, msd_fake_scores = self.msd(audio_output.detach())
-        
-        # Combine scores from both discriminators
-        real_scores = mpd_real_scores + msd_real_scores
-        fake_scores = mpd_fake_scores + msd_fake_scores
-        
-        # Calculate discriminator loss
-        disc_loss, disc_losses_dict = self.hifi_loss.discriminator_loss(
-            real_scores, fake_scores
-        )
-        
-        # Log metrics
-        self.log('train_disc_loss', disc_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        for k, v in disc_losses_dict.items():
-            self.log(f'train_{k}', v, on_step=False, on_epoch=True, logger=True)
-        
-        return disc_loss
+            # ========== Step 2: Train Discriminator ==========
+            # Only train discriminator after disc_start_step and on specified intervals
+            if self.train_step_idx >= self.disc_start_step and (self.train_step_idx % self.discriminator_train_every) == 0:
+                # Generate audio without gradients for discriminator training
+                with torch.no_grad():
+                    outputs = self(mel_input)
+                    audio_output = outputs['audio_output']
+                
+                # MPD discriminator
+                mpd_real_feat_maps, mpd_real_scores = self.mpd(audio_target)
+                mpd_fake_feat_maps, mpd_fake_scores = self.mpd(audio_output.detach())
+                
+                # MSD discriminator
+                msd_real_feat_maps, msd_real_scores = self.msd(audio_target)
+                msd_fake_feat_maps, msd_fake_scores = self.msd(audio_output.detach())
+                
+                # Combine scores
+                real_scores = mpd_real_scores + msd_real_scores
+                fake_scores = mpd_fake_scores + msd_fake_scores
+                
+                # Calculate discriminator loss with accumulation factor
+                disc_loss, disc_losses_dict = self.hifi_loss.discriminator_loss(
+                    real_scores, fake_scores
+                )
+                disc_loss = disc_loss * accumulation_factor
+                
+                # Manual backward pass for gradient accumulation
+                self.manual_backward(disc_loss)
+                
+                # Only update weights on the last accumulation step
+                if is_last_accumulation_step:
+                    opt_d.step()
+                    opt_d.zero_grad()
+                
+                # Log metrics (unscaled)
+                self.log('train_disc_loss', disc_loss / accumulation_factor, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+                for k, v in disc_losses_dict.items():
+                    self.log(f'train_{k}', v, on_step=False, on_epoch=True, logger=True)
     
     def validation_step(self, batch, batch_idx):
         """Validation step for combined model"""
@@ -471,68 +483,25 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             gen_lr = self.gen_lr
             disc_lr = self.disc_lr
             
-            # Create optimizer groups based on separate_checkpointing
-            if self.separate_checkpointing:
-                # Separate optimizers for each component
-                unet_optimizer = torch.optim.AdamW(
-                    self.unet.parameters(),
-                    lr=learning_rate,
-                    weight_decay=weight_decay
-                )
-                
-                gen_optimizer = torch.optim.AdamW(
-                    self.generator.parameters(),
-                    lr=gen_lr,
-                    weight_decay=weight_decay
-                )
-                
-                disc_optimizer = torch.optim.AdamW(
-                    list(self.mpd.parameters()) + list(self.msd.parameters()),
-                    lr=disc_lr,
-                    weight_decay=weight_decay
-                )
-                
-                # Combine U-Net and Generator for first optimizer group
-                unet_gen_optimizer = {
-                    'optimizer': torch.optim.AdamW(
-                        list(self.unet.parameters()) + list(self.generator.parameters()),
-                        lr=learning_rate,
-                        weight_decay=weight_decay
-                    ),
-                    'lr_scheduler': self._get_scheduler(0)
-                }
-                
-                disc_optimizer_config = {
-                    'optimizer': disc_optimizer,
-                    'lr_scheduler': self._get_scheduler(1)
-                }
-                
-                return [unet_gen_optimizer, disc_optimizer_config]
-            else:
-                # Joint optimizer for U-Net and Generator
-                optimizer_g = torch.optim.AdamW(
-                    list(self.unet.parameters()) + list(self.generator.parameters()),
-                    lr=gen_lr,
-                    weight_decay=weight_decay
-                )
-                
-                # Separate optimizer for discriminators
-                optimizer_d = torch.optim.AdamW(
-                    list(self.mpd.parameters()) + list(self.msd.parameters()),
-                    lr=disc_lr,
-                    weight_decay=weight_decay
-                )
-                
-                # Configure schedulers
-                scheduler_g = self._get_scheduler(0)
-                scheduler_d = self._get_scheduler(1)
-                
-                return [
-                    {'optimizer': optimizer_g, 'lr_scheduler': scheduler_g},
-                    {'optimizer': optimizer_d, 'lr_scheduler': scheduler_d}
-                ]
+            # Joint optimizer for U-Net and Generator
+            optimizer_g = torch.optim.AdamW(
+                list(self.unet.parameters()) + list(self.generator.parameters()),
+                lr=gen_lr,
+                weight_decay=weight_decay
+            )
+            
+            # Separate optimizer for discriminators
+            optimizer_d = torch.optim.AdamW(
+                list(self.mpd.parameters()) + list(self.msd.parameters()),
+                lr=disc_lr,
+                weight_decay=weight_decay
+            )
+            
+            # Configure schedulers - now just return the optimizers without schedulers
+            # For manual optimization, schedulers would need to be updated manually
+            return [optimizer_g, optimizer_d]
     
-    def _get_scheduler(self, optimizer_idx):
+    def _get_scheduler(self, optimizer):
         """Get scheduler for the specified optimizer"""
         scheduler_type = self.config['train'].get('lr_scheduler', 'reduce_on_plateau')
         
@@ -542,7 +511,7 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             
             return {
                 'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    self.optimizers()[optimizer_idx],
+                    optimizer,
                     mode='min',
                     factor=lr_factor,
                     patience=lr_patience,
@@ -554,13 +523,13 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             }
         elif scheduler_type == 'step':
             return torch.optim.lr_scheduler.StepLR(
-                self.optimizers()[optimizer_idx],
+                optimizer,
                 step_size=10,
                 gamma=0.5
             )
         else:
             return None
-    
+            
     def on_save_checkpoint(self, checkpoint):
         """Custom checkpoint handling"""
         if self.vocoder_enabled and self.separate_checkpointing:

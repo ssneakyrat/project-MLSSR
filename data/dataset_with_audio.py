@@ -6,6 +6,10 @@ import numpy as np
 import math
 
 class H5FileManager:
+    """
+    Singleton manager for H5 files with multiprocessing support.
+    This avoids keeping file handles during pickling.
+    """
     _instance = None
     
     @staticmethod
@@ -16,16 +20,51 @@ class H5FileManager:
     
     def __init__(self):
         self.h5_files = {}
+        self.file_paths = {}  # Store paths instead of open file handles for pickling
     
     def get_file(self, file_path):
+        """Get an open h5py file handle, opening it if necessary"""
+        # Store the file path for reopening in worker processes
+        self.file_paths[file_path] = file_path
+        
+        # If we're in the main process or a worker process with open files
         if file_path not in self.h5_files:
-            self.h5_files[file_path] = h5py.File(file_path, 'r')
+            try:
+                self.h5_files[file_path] = h5py.File(file_path, 'r')
+            except Exception as e:
+                print(f"Error opening H5 file {file_path}: {e}")
+                return None
+        
         return self.h5_files[file_path]
     
     def close_all(self):
+        """Close all open file handles"""
         for file in self.h5_files.values():
-            file.close()
+            try:
+                file.close()
+            except:
+                pass
         self.h5_files = {}
+    
+    def __getstate__(self):
+        """Custom method for pickling - only keep file paths, not open handles"""
+        state = self.__dict__.copy()
+        # Don't pickle open file handles
+        state['h5_files'] = {}
+        return state
+    
+    def __setstate__(self, state):
+        """Custom method for unpickling - restore the instance without open files"""
+        self.__dict__.update(state)
+        # Files will be reopened when needed via get_file()
+
+def worker_init_fn(worker_id):
+    """
+    Initialize each worker process with its own file handles.
+    This is called for each worker when it starts.
+    """
+    # Reset the file manager's open file handles in each worker
+    H5FileManager.get_instance().h5_files = {}
 
 class H5Dataset(Dataset):
     def __init__(self, h5_path, data_key, transform=None, lazy_load=True, variable_length=False):
@@ -35,11 +74,12 @@ class H5Dataset(Dataset):
         self.lazy_load = lazy_load
         self.variable_length = variable_length
         
-        if lazy_load:
-            h5_manager = H5FileManager.get_instance()
-            h5_file = h5_manager.get_file(h5_path)
-        else:
-            h5_file = h5py.File(h5_path, 'r')
+        # Store only the file path, not an open file handle
+        h5_manager = H5FileManager.get_instance()
+        h5_file = h5_manager.get_file(h5_path)
+        
+        if h5_file is None:
+            raise IOError(f"Failed to open H5 file: {h5_path}")
             
         if data_key in h5_file:
             self.length = len(h5_file[data_key])
@@ -48,8 +88,11 @@ class H5Dataset(Dataset):
             raise KeyError(f"Data key '{data_key}' not found in {h5_path}")
             
         if not lazy_load:
+            # For non-lazy loading, load all data into memory
             self.data = h5_file[data_key][:]
-            h5_file.close()
+            # No need to close the file since h5_manager will handle it
+        else:
+            self.data = None
         
         # Store audio config attributes if available
         if lazy_load:
@@ -65,8 +108,18 @@ class H5Dataset(Dataset):
     
     def __getitem__(self, idx):
         if self.lazy_load:
+            # Get a fresh file handle for each worker
             h5_manager = H5FileManager.get_instance()
             h5_file = h5_manager.get_file(self.h5_path)
+            
+            if h5_file is None:
+                # If file opening failed, return zeros as fallback
+                if hasattr(self, 'data_shape'):
+                    return torch.zeros(self.data_shape, dtype=torch.float32)
+                else:
+                    raise IOError(f"Failed to open H5 file for reading: {self.h5_path}")
+            
+            # Get the data
             data = h5_file[self.data_key][idx]
             data = torch.from_numpy(data).float()
         else:
@@ -76,6 +129,14 @@ class H5Dataset(Dataset):
             data = self.transform(data)
             
         return data
+    
+    def __getstate__(self):
+        """Custom method for pickling - only keep necessary attributes"""
+        state = self.__dict__.copy()
+        # Don't pickle data if lazy loading is enabled
+        if self.lazy_load:
+            state['data'] = None
+        return state
 
 class MelSpectrogramDataset(H5Dataset):
     def __getitem__(self, idx):
@@ -121,7 +182,7 @@ class VariableLengthMelDataset(H5Dataset):
         return data
 
 class MelAudioDataset(Dataset):
-    """Dataset that loads both mel spectrograms and audio waveforms"""
+    """Dataset that loads both mel spectrograms and audio waveforms with multiprocessing support"""
     def __init__(self, h5_path, mel_key='mel_spectrograms', audio_key='waveforms', 
                  max_mel_frames=None, max_audio_samples=None, lazy_load=True):
         self.h5_path = h5_path
@@ -131,84 +192,124 @@ class MelAudioDataset(Dataset):
         self.max_audio_samples = max_audio_samples
         self.lazy_load = lazy_load
         
-        if lazy_load:
-            h5_manager = H5FileManager.get_instance()
-            self.h5_file = h5_manager.get_file(h5_path)
-        else:
-            self.h5_file = h5py.File(h5_path, 'r')
-        
-        # Verify keys exist
-        if mel_key not in self.h5_file:
-            raise KeyError(f"Mel spectrogram key '{mel_key}' not found in {h5_path}")
-        if audio_key not in self.h5_file:
-            raise KeyError(f"Audio key '{audio_key}' not found in {h5_path}")
-        
-        self.length = len(self.h5_file[mel_key])
-        
-        # Store config attributes
-        self.mel_attrs = dict(self.h5_file[mel_key].attrs) if hasattr(self.h5_file[mel_key], 'attrs') else {}
-        self.audio_attrs = dict(self.h5_file[audio_key].attrs) if hasattr(self.h5_file[audio_key], 'attrs') else {}
-        
-        # Check if we have length information
-        self.lengths_available = 'lengths' in self.h5_file
-        
-        # If not lazy loading, load all data into memory
-        if not lazy_load:
-            self.mel_data = self.h5_file[mel_key][:]
-            self.audio_data = self.h5_file[audio_key][:]
-            if self.lengths_available:
-                self.lengths = self.h5_file['lengths'][:]
-            self.h5_file.close()
+        # Open file temporarily just to get metadata, close it after
+        # This avoids keeping open file handles during pickling
+        with h5py.File(h5_path, 'r') as h5_file:
+            # Verify keys exist
+            if mel_key not in h5_file:
+                raise KeyError(f"Mel spectrogram key '{mel_key}' not found in {h5_path}")
+            if audio_key not in h5_file:
+                raise KeyError(f"Audio key '{audio_key}' not found in {h5_path}")
+            
+            self.length = len(h5_file[mel_key])
+            
+            # Store config attributes
+            self.mel_attrs = dict(h5_file[mel_key].attrs) if hasattr(h5_file[mel_key], 'attrs') else {}
+            self.audio_attrs = dict(h5_file[audio_key].attrs) if hasattr(h5_file[audio_key], 'attrs') else {}
+            
+            # Check if we have length information
+            self.lengths_available = 'lengths' in h5_file
+            
+            # Store data shapes for fallback
+            self.mel_shape = h5_file[mel_key].shape[1:]
+            self.audio_shape = h5_file[audio_key].shape[1:]
+            
+            # If not lazy loading, load all data into memory
+            if not lazy_load:
+                self.mel_data = h5_file[mel_key][:]
+                self.audio_data = h5_file[audio_key][:]
+                if self.lengths_available:
+                    self.lengths = h5_file['lengths'][:]
     
     def __len__(self):
         return self.length
     
     def __getitem__(self, idx):
-        # Load mel spectrogram
-        if self.lazy_load:
-            mel_data = self.h5_file[self.mel_key][idx]
-            audio_data = self.h5_file[self.audio_key][idx]
-            
-            # Get actual lengths if available
-            if self.lengths_available:
-                mel_length, audio_length = self.h5_file['lengths'][idx]
+        try:
+            # Get data using H5FileManager (for lazy loading) or from memory
+            if self.lazy_load:
+                h5_manager = H5FileManager.get_instance()
+                h5_file = h5_manager.get_file(self.h5_path)
+                
+                if h5_file is None:
+                    # Handle failed file open
+                    return self._create_fallback_tensors()
+                
+                try:
+                    mel_data = h5_file[self.mel_key][idx]
+                    audio_data = h5_file[self.audio_key][idx]
+                    
+                    # Get actual lengths if available
+                    if self.lengths_available:
+                        mel_length, audio_length = h5_file['lengths'][idx]
+                    else:
+                        mel_length, audio_length = mel_data.shape[1], len(audio_data)
+                except Exception as e:
+                    print(f"Error reading data for index {idx}: {e}")
+                    return self._create_fallback_tensors()
             else:
-                mel_length, audio_length = mel_data.shape[1], len(audio_data)
+                mel_data = self.mel_data[idx]
+                audio_data = self.audio_data[idx]
+                
+                # Get actual lengths if available
+                if self.lengths_available:
+                    mel_length, audio_length = self.lengths[idx]
+                else:
+                    mel_length, audio_length = mel_data.shape[1], len(audio_data)
+            
+            # Convert to torch tensors
+            mel_tensor = torch.from_numpy(mel_data).float()
+            
+            # Apply max length constraints if specified
+            if self.max_mel_frames is not None and mel_tensor.shape[1] > self.max_mel_frames:
+                mel_tensor = mel_tensor[:, :self.max_mel_frames]
+                mel_length = min(mel_length, self.max_mel_frames)
+            
+            # Add channel dimension for mel: [freq, time] -> [1, freq, time]
+            mel_tensor = mel_tensor.unsqueeze(0)
+            
+            # Process audio data
+            audio_tensor = torch.from_numpy(audio_data[:audio_length]).float()
+            
+            if self.max_audio_samples is not None and audio_tensor.size(0) > self.max_audio_samples:
+                audio_tensor = audio_tensor[:self.max_audio_samples]
+            
+            # Normalize audio to [-1, 1] if needed (assuming int16 input)
+            if audio_tensor.dtype == torch.int16 or (audio_tensor.max() > 1.0 or audio_tensor.min() < -1.0):
+                audio_tensor = audio_tensor / 32767.0
+            
+            # Add channel dimension for audio: [samples] -> [1, samples]
+            audio_tensor = audio_tensor.unsqueeze(0)
+            
+            return mel_tensor, audio_tensor
+            
+        except Exception as e:
+            print(f"Error in __getitem__ for index {idx}: {e}")
+            return self._create_fallback_tensors()
+    
+    def _create_fallback_tensors(self):
+        """Create fallback tensors in case of errors"""
+        # Create empty tensors with the correct shapes
+        if hasattr(self, 'mel_shape'):
+            # Use stored shapes for correct dimensions
+            mel_tensor = torch.zeros((1, *self.mel_shape), dtype=torch.float32)
+            audio_tensor = torch.zeros((1, self.max_audio_samples or 10000), dtype=torch.float32)
         else:
-            mel_data = self.mel_data[idx]
-            audio_data = self.audio_data[idx]
-            
-            # Get actual lengths if available
-            if self.lengths_available:
-                mel_length, audio_length = self.lengths[idx]
-            else:
-                mel_length, audio_length = mel_data.shape[1], len(audio_data)
-        
-        # Convert to torch tensors
-        mel_tensor = torch.from_numpy(mel_data).float()
-        
-        # Apply max length constraints if specified
-        if self.max_mel_frames is not None and mel_tensor.shape[1] > self.max_mel_frames:
-            mel_tensor = mel_tensor[:, :self.max_mel_frames]
-            mel_length = min(mel_length, self.max_mel_frames)
-        
-        # Add channel dimension for mel: [freq, time] -> [1, freq, time]
-        mel_tensor = mel_tensor.unsqueeze(0)
-        
-        # Process audio data
-        audio_tensor = torch.from_numpy(audio_data[:audio_length]).float()
-        
-        if self.max_audio_samples is not None and audio_tensor.size(0) > self.max_audio_samples:
-            audio_tensor = audio_tensor[:self.max_audio_samples]
-        
-        # Normalize audio to [-1, 1] if needed (assuming int16 input)
-        if audio_tensor.dtype == torch.int16 or (audio_tensor.max() > 1.0 or audio_tensor.min() < -1.0):
-            audio_tensor = audio_tensor / 32767.0
-        
-        # Add channel dimension for audio: [samples] -> [1, samples]
-        audio_tensor = audio_tensor.unsqueeze(0)
+            # Reasonable defaults if shapes are unknown
+            mel_tensor = torch.zeros((1, 80, self.max_mel_frames or 100), dtype=torch.float32)
+            audio_tensor = torch.zeros((1, self.max_audio_samples or 10000), dtype=torch.float32)
         
         return mel_tensor, audio_tensor
+    
+    def __getstate__(self):
+        """Custom method for pickling - only keep necessary attributes"""
+        state = self.__dict__.copy()
+        # Don't pickle in-memory data if lazy loading is used
+        if self.lazy_load:
+            state.pop('mel_data', None)
+            state.pop('audio_data', None)
+            state.pop('lengths', None)
+        return state
 
 def collate_variable_length(batch):
     """Custom collate function for variable length mel spectrograms"""
@@ -370,6 +471,12 @@ class MelAudioDataModule(pl.LightningDataModule):
             )
     
     def train_dataloader(self):
+        # Check if we should use multiprocessing
+        use_mp = self.num_workers > 0
+        
+        if not use_mp:
+            print("Using single-process data loading (num_workers=0)")
+        
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -377,19 +484,24 @@ class MelAudioDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=True,
-            persistent_workers=True,
-            collate_fn=collate_variable_length if self.variable_length else None
+            persistent_workers=use_mp,
+            collate_fn=collate_variable_length if self.variable_length else None,
+            worker_init_fn=worker_init_fn if use_mp else None
         )
         
     def val_dataloader(self):
+        # Check if we should use multiprocessing
+        use_mp = self.num_workers > 0
+        
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            persistent_workers=True,
-            collate_fn=collate_variable_length if self.variable_length else None
+            persistent_workers=use_mp,
+            collate_fn=collate_variable_length if self.variable_length else None,
+            worker_init_fn=worker_init_fn if use_mp else None
         )
         
     def teardown(self, stage=None):

@@ -124,6 +124,9 @@ def generate_audio(mel, generator, config, device):
     # Convert to numpy and remove batch dimension
     audio = audio.squeeze().cpu().numpy()
     
+    # Ensure audio is float32 (soundfile doesn't support float16)
+    audio = audio.astype(np.float32)
+    
     # Normalize
     audio = audio / (np.abs(audio).max() + 1e-7)
     

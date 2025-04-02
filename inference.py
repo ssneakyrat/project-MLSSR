@@ -11,6 +11,17 @@ from models.combined_model import MultiBandUNetWithHiFiGAN
 from models.multi_band_unet import MultiBandUNet
 from models.hifi_gan import Generator
 
+def save_audio_safely(audio_np, file_path, sample_rate):
+    """Save audio with proper type handling for soundfile"""
+    # Ensure audio is float32 (soundfile doesn't support float16)
+    audio_np = audio_np.astype(np.float32)
+    
+    # Normalize
+    audio_np = audio_np / (np.abs(audio_np).max() + 1e-7)
+    
+    # Save as WAV with explicit subtype
+    sf.write(file_path, audio_np, sample_rate, subtype='FLOAT')
+    
 def plot_mel_spectrogram(mel, output_path, title=None):
     """Plot mel spectrogram and save to file"""
     plt.figure(figsize=(10, 4))

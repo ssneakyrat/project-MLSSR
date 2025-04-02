@@ -191,8 +191,19 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             # Standard U-Net training with single optimizer
             opt = self.optimizers()
             
-            # Forward pass
+            # Process input data - handle list structure
             mel_input = batch
+            
+            # Handle batch being a list or tuple
+            if isinstance(mel_input, (list, tuple)):
+                if len(mel_input) > 0:
+                    if isinstance(mel_input[0], torch.Tensor):
+                        mel_input = mel_input[0]  # Use first element if it's a tensor
+                    elif isinstance(mel_input, tuple) and len(mel_input) == 2:
+                        # This might be (data, mask) format
+                        mel_input = mel_input[0]
+            
+            # Forward pass
             y_pred = self(mel_input)
             mel_output = y_pred['mel_output']
             
@@ -217,12 +228,38 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             opt_g, opt_d = self.optimizers()
             
             # Handle input data format
-            if isinstance(batch, tuple) or isinstance(batch, list):
-                mel_input, audio_target = batch
+            if isinstance(batch, (tuple, list)):
+                # Check if the first element is itself a tuple/list (complex structure)
+                if len(batch) == 2 and isinstance(batch[0], (tuple, list)):
+                    # Complex structure with masks: ((mel, audio), (mel_mask, audio_mask))
+                    data, masks = batch
+                    mel_input, audio_target = data
+                else:
+                    # Simple structure: (mel, audio)
+                    mel_input, audio_target = batch
             else:
                 # This should not happen in vocoder mode
                 print(f"Warning: Expected tuple/list batch in vocoder mode, got {type(batch)}")
                 return None
+            
+            # Ensure inputs are tensors, not lists
+            if isinstance(mel_input, list):
+                print(f"Warning: mel_input is a list with {len(mel_input)} elements in training_step")
+                if len(mel_input) > 0 and isinstance(mel_input[0], torch.Tensor):
+                    mel_input = mel_input[0]
+                else:
+                    print(f"Cannot process list input for mel_input")
+                    # Return a dummy value to avoid crashing
+                    return torch.tensor(0.0, device=self.device)
+            
+            if isinstance(audio_target, list):
+                print(f"Warning: audio_target is a list with {len(audio_target)} elements in training_step")
+                if len(audio_target) > 0 and isinstance(audio_target[0], torch.Tensor):
+                    audio_target = audio_target[0]
+                else:
+                    print(f"Cannot process list input for audio_target")
+                    # Return a dummy value to avoid crashing
+                    return torch.tensor(0.0, device=self.device)
             
             # ========== Step 1: Train Generator (U-Net + HiFi-GAN Generator) ==========
             # Only train generator on specified intervals
@@ -320,6 +357,15 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             # U-Net only validation
             mel_input = batch
             
+            # Handle batch being a list or tuple
+            if isinstance(mel_input, (list, tuple)):
+                if len(mel_input) > 0:
+                    if isinstance(mel_input[0], torch.Tensor):
+                        mel_input = mel_input[0]  # Use first element if it's a tensor
+                    elif isinstance(mel_input, tuple) and len(mel_input) == 2:
+                        # This might be (data, mask) format
+                        mel_input = mel_input[0]
+            
             # Forward pass through U-Net
             outputs = self(mel_input)
             mel_output = outputs['mel_output']
@@ -337,11 +383,37 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             return val_loss
         else:
             # Joint validation with vocoder
-            if isinstance(batch, tuple) or isinstance(batch, list):
-                mel_input, audio_target = batch
+            if isinstance(batch, (tuple, list)):
+                # Check if the first element is itself a tuple/list (complex structure)
+                if len(batch) == 2 and isinstance(batch[0], (tuple, list)):
+                    # Complex structure with masks: ((mel, audio), (mel_mask, audio_mask))
+                    data, masks = batch
+                    mel_input, audio_target = data
+                else:
+                    # Simple structure: (mel, audio)
+                    mel_input, audio_target = batch
             else:
                 # Fallback to U-Net only
                 return super().validation_step(batch, batch_idx)
+            
+            # Ensure inputs are tensors, not lists
+            if isinstance(mel_input, list):
+                print(f"Warning: mel_input is a list with {len(mel_input)} elements in validation_step")
+                if len(mel_input) > 0 and isinstance(mel_input[0], torch.Tensor):
+                    mel_input = mel_input[0]
+                else:
+                    print(f"Cannot process list input for mel_input")
+                    # Return a dummy value to avoid crashing
+                    return torch.tensor(0.0, device=self.device)
+            
+            if isinstance(audio_target, list):
+                print(f"Warning: audio_target is a list with {len(audio_target)} elements in validation_step")
+                if len(audio_target) > 0 and isinstance(audio_target[0], torch.Tensor):
+                    audio_target = audio_target[0]
+                else:
+                    print(f"Cannot process list input for audio_target")
+                    # Return a dummy value to avoid crashing
+                    return torch.tensor(0.0, device=self.device)
             
             # Forward pass
             outputs = self(mel_input)
@@ -383,8 +455,8 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             
             # Log metrics
             self.log('val_unet_loss', unet_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-            self.log('val_gen_loss', gen_loss, on_step=False, on_epoch=True, logger=True)
-            self.log('val_disc_loss', disc_loss, on_step=False, on_epoch=True, logger=True)
+            self.log('val_gen_loss', gen_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('val_disc_loss', disc_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             
             # Log validation images and audio
@@ -450,6 +522,10 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             target = audio_target[idx, 0].cpu().numpy()
             output = audio_output[idx, 0].cpu().numpy()
             
+            # Ensure audio is float32 (soundfile doesn't support float16)
+            target = target.astype(np.float32)
+            output = output.astype(np.float32)
+            
             # Normalize to [-1, 1]
             target = target / (np.abs(target).max() + 1e-7)
             output = output / (np.abs(output).max() + 1e-7)
@@ -458,8 +534,9 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             target_path = f'val_target_{i}_{self.current_epoch}.wav'
             output_path = f'val_output_{i}_{self.current_epoch}.wav'
             
-            sf.write(target_path, target, sample_rate)
-            sf.write(output_path, output, sample_rate)
+            # Specify dtype explicitly when writing audio
+            sf.write(target_path, target, sample_rate, subtype='FLOAT')
+            sf.write(output_path, output, sample_rate, subtype='FLOAT')
             
             # Log to tensorboard
             self.logger.experiment.add_audio(

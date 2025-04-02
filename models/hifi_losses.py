@@ -66,7 +66,7 @@ class HiFiGANLoss:
             return (loss_real + loss_fake) / len(disc_outputs_real)
     
     def calculate_feature_matching_loss(self, feat_maps_real, feat_maps_fake):
-        """Calculate feature matching loss
+        """Calculate feature matching loss with support for different feature map sizes
         
         Args:
             feat_maps_real: List of feature maps from discriminator for real audio
@@ -80,19 +80,33 @@ class HiFiGANLoss:
             feat_maps_fake = [feat_maps_fake]
         
         loss = 0
+        total_layers = 0
         
         # Iterate through discriminators
         for fmaps_real_d, fmaps_fake_d in zip(feat_maps_real, feat_maps_fake):
             # Iterate through feature maps from each layer
             for fmap_r, fmap_f in zip(fmaps_real_d, fmaps_fake_d):
+                # Handle different feature map sizes by cropping to the smaller size
+                if fmap_r.size(2) != fmap_f.size(2):
+                    min_size = min(fmap_r.size(2), fmap_f.size(2))
+                    fmap_r = fmap_r[:, :, :min_size, ...]
+                    fmap_f = fmap_f[:, :, :min_size, ...]
+                
+                # Handle potential 4D tensors with different last dimension
+                if fmap_r.dim() > 3 and fmap_f.dim() > 3 and fmap_r.size(3) != fmap_f.size(3):
+                    min_size = min(fmap_r.size(3), fmap_f.size(3))
+                    fmap_r = fmap_r[:, :, :, :min_size]
+                    fmap_f = fmap_f[:, :, :, :min_size]
+                
+                # Calculate L1 loss on the matched size
                 loss += F.l1_loss(fmap_f, fmap_r.detach())
+                total_layers += 1
         
         # Normalize by number of feature maps
-        total_layers = sum(len(fm) for fm in feat_maps_real)
-        return loss / total_layers
+        return loss / max(1, total_layers)
     
     def calculate_mel_loss(self, audio_real, audio_fake):
-        """Calculate mel-spectrogram reconstruction loss
+        """Calculate mel-spectrogram reconstruction loss with length matching
         
         Args:
             audio_real: Real waveform [B, 1, T]
@@ -101,6 +115,12 @@ class HiFiGANLoss:
         Returns:
             loss: L1 loss between real and fake mel-spectrograms
         """
+        # Handle different audio lengths by cropping to the smaller size
+        if audio_real.size(2) != audio_fake.size(2):
+            min_size = min(audio_real.size(2), audio_fake.size(2))
+            audio_real = audio_real[:, :, :min_size]
+            audio_fake = audio_fake[:, :, :min_size]
+        
         # Extract mel-spectrograms from audio
         mel_real = self.audio_to_mel(audio_real.squeeze(1))
         mel_fake = self.audio_to_mel(audio_fake.squeeze(1))

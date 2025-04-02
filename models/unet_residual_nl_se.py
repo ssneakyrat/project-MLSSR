@@ -9,11 +9,17 @@ import torchvision
 
 from models.losses import CombinedLoss
 from models.residual_blocks import EncoderBlockResidual, DecoderBlockResidual, DilatedBottleneck
+from models.residual_blocks.se_blocks import EncoderBlockResidualSE, DecoderBlockResidualSE, SqueezeExcitationBlock
+from models.residual_blocks.non_local_blocks import NonLocalBlock, NonLocalAttentionBlock
 
-class UNetResidual(pl.LightningModule):
+class UNetResidualNLSE(pl.LightningModule):
     """
-    Enhanced U-Net architecture with residual connections and dilated bottleneck
-    with self-attention for mel-spectrogram reconstruction.
+    Enhanced U-Net architecture with residual connections, dilated bottleneck with
+    self-attention, Squeeze-Excitation blocks, and Non-Local blocks for improved
+    mel-spectrogram reconstruction with better background feature preservation.
+    
+    Non-Local blocks are added at specified depths to capture global context,
+    which helps maintain consistency in homogeneous background areas.
     
     Input: (B, 1, 128, 80) - Batch of mel-spectrograms
     Output: (B, 1, 128, 80) - Reconstructed mel-spectrograms
@@ -31,6 +37,18 @@ class UNetResidual(pl.LightningModule):
         # Get scale factors from config
         self.scale_factor = config['model'].get('scale_factor', 1.0)
         self.layer_count = config['model'].get('layer_count', 4)  # Default to 4 layers
+        
+        # Non-Local Blocks configuration
+        # By default, add Non-Local blocks to the bottleneck and the last encoder layer
+        self.nl_blocks_config = config['model'].get('nl_blocks', {
+            'use_nl_blocks': True,
+            'nl_in_bottleneck': True,
+            'nl_mode': 'embedded',  # 'dot', 'gaussian', 'embedded', or 'concatenation'
+            'nl_encoder_layers': [-1],  # Indices of encoder layers to add NL blocks (-1 = last)
+            'nl_decoder_layers': [0],   # Indices of decoder layers to add NL blocks (0 = first)
+            'nl_reduction_ratio': 2,    # Channel reduction ratio for efficiency
+            'nl_use_sub_sample': True,  # Whether to use sub-sampling in NL blocks
+        })
         
         # Define channel progressions based on layer count
         if self.layer_count == 2:
@@ -96,27 +114,116 @@ class UNetResidual(pl.LightningModule):
         print(f"Bottleneck channels: {self.bottleneck_channels}")
         print(f"Decoder channels: {self.decoder_channels}")
         
-        # Create encoder blocks using ModuleList for dynamic layer count
-        self.encoder_blocks = nn.ModuleList()
-        for i in range(self.layer_count):
-            self.encoder_blocks.append(
-                EncoderBlockResidual(self.encoder_channels[i], self.encoder_channels[i+1])
-            )
+        # SE reduction ratio - for deeper layers we can use a larger reduction ratio
+        self.se_reduction = 16
         
-        # Bottleneck - Use the new DilatedBottleneck with attention
+        # Create encoder blocks using ModuleList for dynamic layer count
+        # Use SE blocks for deeper layers (50% of layers)
+        self.encoder_blocks = nn.ModuleList()
+        se_layer_threshold = self.layer_count // 2  # Apply SE to deeper half of layers
+        
+        for i in range(self.layer_count):
+            if i >= se_layer_threshold:  # Apply SE to deeper layers
+                self.encoder_blocks.append(
+                    EncoderBlockResidualSE(
+                        self.encoder_channels[i], 
+                        self.encoder_channels[i+1],
+                        reduction=self.se_reduction
+                    )
+                )
+                print(f"Adding SE to encoder layer {i+1}")
+            else:
+                self.encoder_blocks.append(
+                    EncoderBlockResidual(self.encoder_channels[i], self.encoder_channels[i+1])
+                )
+        
+        # Bottleneck - Use the DilatedBottleneck with attention
         self.bottleneck = DilatedBottleneck(self.encoder_channels[-1], self.bottleneck_channels)
         
+        # Add Non-Local Block to the bottleneck if specified
+        if self.nl_blocks_config.get('use_nl_blocks', True) and self.nl_blocks_config.get('nl_in_bottleneck', True):
+            self.bottleneck_nl = NonLocalBlock(
+                in_channels=self.encoder_channels[-1],
+                inter_channels=self.encoder_channels[-1] // self.nl_blocks_config.get('nl_reduction_ratio', 2),
+                mode=self.nl_blocks_config.get('nl_mode', 'embedded'),
+                sub_sample=False  # Disable sub-sampling in bottleneck to avoid dimension issues
+            )
+            print(f"Added Non-Local Block to bottleneck with mode '{self.nl_blocks_config.get('nl_mode', 'embedded')}'")
+        else:
+            self.bottleneck_nl = None
+        
+        # Create Non-Local Blocks for specified encoder layers
+        if self.nl_blocks_config.get('use_nl_blocks', True):
+            self.encoder_nl_blocks = nn.ModuleList()
+            nl_encoder_layers = self.nl_blocks_config.get('nl_encoder_layers', [-1])
+            
+            # Convert negative indices to positive
+            for i in range(len(nl_encoder_layers)):
+                if nl_encoder_layers[i] < 0:
+                    nl_encoder_layers[i] = self.layer_count + nl_encoder_layers[i]
+            
+            # Create each Non-Local Block
+            for i in range(self.layer_count):
+                if i in nl_encoder_layers:
+                    self.encoder_nl_blocks.append(
+                        NonLocalBlock(
+                            in_channels=self.encoder_channels[i+1],
+                            inter_channels=self.encoder_channels[i+1] // self.nl_blocks_config.get('nl_reduction_ratio', 2),
+                            mode=self.nl_blocks_config.get('nl_mode', 'embedded'),
+                            sub_sample=False  # Disable sub-sampling in encoder to avoid dimension issues
+                        )
+                    )
+                    print(f"Added Non-Local Block to encoder layer {i+1}")
+                else:
+                    self.encoder_nl_blocks.append(None)
+        else:
+            self.encoder_nl_blocks = None
+        
         # Create decoder blocks using ModuleList for dynamic layer count
+        # Use SE blocks for deeper layers (50% of layers)
         self.decoder_blocks = nn.ModuleList()
+        
         for i in range(self.layer_count):
             if i == 0:
                 in_channels = self.encoder_channels[-1]
             else:
                 in_channels = self.decoder_channels[i-1]
             
-            self.decoder_blocks.append(
-                DecoderBlockResidual(in_channels, self.decoder_channels[i])
-            )
+            if i < se_layer_threshold:  # Apply SE to deeper layers (which are earlier in decoder path)
+                self.decoder_blocks.append(
+                    DecoderBlockResidualSE(
+                        in_channels, 
+                        self.decoder_channels[i],
+                        reduction=self.se_reduction
+                    )
+                )
+                print(f"Adding SE to decoder layer {i+1}")
+            else:
+                self.decoder_blocks.append(
+                    DecoderBlockResidual(in_channels, self.decoder_channels[i])
+                )
+        
+        # Create Non-Local Blocks for specified decoder layers
+        if self.nl_blocks_config.get('use_nl_blocks', True):
+            self.decoder_nl_blocks = nn.ModuleList()
+            nl_decoder_layers = self.nl_blocks_config.get('nl_decoder_layers', [0])
+            
+            # Create each Non-Local Block
+            for i in range(self.layer_count):
+                if i in nl_decoder_layers:
+                    self.decoder_nl_blocks.append(
+                        NonLocalBlock(
+                            in_channels=self.decoder_channels[i],
+                            inter_channels=self.decoder_channels[i] // self.nl_blocks_config.get('nl_reduction_ratio', 2),
+                            mode=self.nl_blocks_config.get('nl_mode', 'embedded'),
+                            sub_sample=False  # Disable sub-sampling in decoder to avoid dimension issues
+                        )
+                    )
+                    print(f"Added Non-Local Block to decoder layer {i+1}")
+                else:
+                    self.decoder_nl_blocks.append(None)
+        else:
+            self.decoder_nl_blocks = None
         
         # Final output layer
         self.output = nn.Sigmoid()  # Ensure output is in [0,1] range
@@ -140,9 +247,18 @@ class UNetResidual(pl.LightningModule):
         skip_connections = []
         
         # Encoder path
-        for encoder in self.encoder_blocks:
+        for i, encoder in enumerate(self.encoder_blocks):
             x, skip = encoder(x)
             skip_connections.append(skip)
+            
+            # Apply Non-Local Block to encoder output if specified
+            if self.nl_blocks_config.get('use_nl_blocks', True) and self.encoder_nl_blocks is not None:
+                if self.encoder_nl_blocks[i] is not None:
+                    x = self.encoder_nl_blocks[i](x)
+        
+        # Apply Non-Local Block to bottleneck input if specified
+        if self.nl_blocks_config.get('use_nl_blocks', True) and self.bottleneck_nl is not None:
+            x = self.bottleneck_nl(x)
         
         # Bottleneck
         x = self.bottleneck(x)
@@ -152,6 +268,11 @@ class UNetResidual(pl.LightningModule):
             # Use skip connections in reverse order
             skip = skip_connections[self.layer_count - 1 - i]
             x = decoder(x, skip)
+            
+            # Apply Non-Local Block to decoder output if specified
+            if self.nl_blocks_config.get('use_nl_blocks', True) and self.decoder_nl_blocks is not None:
+                if self.decoder_nl_blocks[i] is not None:
+                    x = self.decoder_nl_blocks[i](x)
         
         # Final output
         x = self.output(x)

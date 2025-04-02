@@ -1,4 +1,4 @@
-# Model configuration for U-Net mel spectrogram reconstruction
+# Model configuration for U-Net mel spectrogram reconstruction with Non-Local blocks
 
 # Data settings
 data:
@@ -32,16 +32,24 @@ model:
   mel_bins: 80
   
   # Network scaling settings
-
+  scale_factor: 1    # Width scaling (channel dimensions)
+  layer_count: 4       # Depth scaling (number of encoder/decoder layer pairs)
   
   # U-Net architecture (base channel dimensions before scaling)
   encoder_channels: [16, 32, 64, 128]
   bottleneck_channels: 256
   decoder_channels: [64, 32, 16, 1]
   
-  scale_factor: 1    # Width scaling (channel dimensions)
-  layer_count: 4     #4 # Depth scaling (number of encoder/decoder layer pairs)
-
+  # Non-Local Block settings
+  nl_blocks:
+    use_nl_blocks: true       # Enable Non-Local blocks
+    nl_in_bottleneck: true    # Add Non-Local block to bottleneck
+    nl_mode: "embedded"       # Mode for Non-Local blocks ('gaussian', 'embedded', 'dot', 'concatenation')
+    nl_encoder_layers: [-1]   # Indices of encoder layers to add NL blocks (-1 = last layer)
+    nl_decoder_layers: [0]    # Indices of decoder layers to add NL blocks (0 = first layer)
+    nl_reduction_ratio: 1     # Channel reduction ratio for efficiency
+    nl_use_sub_sample: false   # Whether to use sub-sampling in NL blocks
+  
   # Loss function weights
   loss_alpha: 0.8  # Weight for L1 loss
   loss_beta: 0.2   # Weight for Spectral Convergence loss
@@ -50,15 +58,15 @@ model:
 train:
   batch_size: 1
   num_epochs: 1000
-  learning_rate: 0.001 #0.001
-  weight_decay: 0.0001 #0.0001
+  learning_rate: 0.001    #0.0008 # Slightly lower learning rate for stability with NL blocks
+  weight_decay: 0.0001
   lr_scheduler: reduce_on_plateau
   lr_patience: 10
-  lr_factor: 0.8 #0.5
+  lr_factor: 0.8
   validation_split: 0.1
   log_interval: 100
   save_interval: 100
-  save_dir: logs/unet
+  save_dir: logs/unet_nl
   
   # Hardware
   num_workers: 4

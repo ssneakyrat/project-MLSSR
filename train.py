@@ -5,15 +5,16 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from utils.utils_general import load_config
-from models.unet_residual_se import UNetResidualSE
+from models.unet_residual_nl_se import UNetResidualNLSE
 from data.mel_spectrogram_dataset import MelSpectrogramDataModule, H5FileManager
 
 def main():
     """
-    Main function for training the enhanced U-Net with SE blocks for mel spectrogram reconstruction.
+    Main function for training the enhanced U-Net with Non-Local blocks and SE blocks for mel spectrogram reconstruction.
+    This model specifically targets better homogeneous background feature reconstruction.
     """
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Train Enhanced U-Net with SE blocks for mel spectrogram reconstruction')
+    parser = argparse.ArgumentParser(description='Train Enhanced U-Net with Non-Local blocks for mel spectrogram reconstruction')
     parser.add_argument('--config', type=str, default='config/default.yaml',
                         help='Path to configuration file')
     parser.add_argument('--h5_path', type=str, default=None,
@@ -37,6 +38,18 @@ def main():
                         help='Maximum number of samples to use from dataset (overrides config)')
     parser.add_argument('--sample_percentage', type=float, default=None,
                         help='Percentage of dataset to use (0.0-1.0, overrides config)')
+    # Non-local block specific arguments
+    parser.add_argument('--nl_mode', type=str, default=None, choices=['gaussian', 'embedded', 'dot', 'concatenation'],
+                        help='Non-local block mode (overrides config)')
+    parser.add_argument('--nl_encoder_layers', type=str, default=None,
+                        help='Encoder layers to add non-local blocks to (comma-separated list, overrides config)')
+    parser.add_argument('--nl_decoder_layers', type=str, default=None,
+                        help='Decoder layers to add non-local blocks to (comma-separated list, overrides config)')
+    parser.add_argument('--nl_reduction_ratio', type=int, default=None,
+                        help='Channel reduction ratio for non-local blocks (overrides config)')
+    parser.add_argument('--disable_nl', action='store_true',
+                        help='Disable non-local blocks to compare with baseline')
+    
     args = parser.parse_args()
     
     # Set random seed for reproducibility
@@ -73,9 +86,35 @@ def main():
     if args.sample_percentage is not None:
         config['data']['sample_percentage'] = args.sample_percentage
     
+    # Setup Non-Local block configuration
+    if 'nl_blocks' not in config['model']:
+        config['model']['nl_blocks'] = {}
+    
+    # Apply Non-Local block arguments
+    if args.disable_nl:
+        config['model']['nl_blocks']['use_nl_blocks'] = False
+    else:
+        config['model']['nl_blocks']['use_nl_blocks'] = True
+    
+    if args.nl_mode is not None:
+        config['model']['nl_blocks']['nl_mode'] = args.nl_mode
+    
+    if args.nl_encoder_layers is not None:
+        # Parse comma-separated list of integers
+        nl_encoder_layers = [int(x) for x in args.nl_encoder_layers.split(',')]
+        config['model']['nl_blocks']['nl_encoder_layers'] = nl_encoder_layers
+    
+    if args.nl_decoder_layers is not None:
+        # Parse comma-separated list of integers
+        nl_decoder_layers = [int(x) for x in args.nl_decoder_layers.split(',')]
+        config['model']['nl_blocks']['nl_decoder_layers'] = nl_decoder_layers
+    
+    if args.nl_reduction_ratio is not None:
+        config['model']['nl_blocks']['nl_reduction_ratio'] = args.nl_reduction_ratio
+    
     # Get save directory from config if not provided
     save_dir = args.save_dir if args.save_dir is not None else config['train']['save_dir']
-    save_dir = os.path.join(save_dir, 'unet_residual_se')  # Use a different subfolder for the SE model
+    save_dir = os.path.join(save_dir, 'unet_residual_nl_se')  # Use a different subfolder for the NL+SE model
     
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
@@ -97,7 +136,7 @@ def main():
         # Save best model checkpoint
         ModelCheckpoint(
             monitor='val_loss',
-            filename='unet_residual_se-best',
+            filename='unet_residual_nl_se-best',
             save_top_k=1,
             mode='min',
             dirpath=best_model_dir,
@@ -109,12 +148,12 @@ def main():
             monitor='val_loss',
             patience=50,  # More patience for this enhanced model
             mode='min',
-            verbose=True
+            verbose=False
         ),
     ]
     
-    # Initialize the LightningModule - now using the enhanced model with SE blocks
-    model = UNetResidualSE(config)
+    # Initialize the LightningModule - now using the enhanced model with Non-Local blocks
+    model = UNetResidualNLSE(config)
     
     # Initialize the DataModule
     data_module = MelSpectrogramDataModule(config)
@@ -134,11 +173,23 @@ def main():
     )
     
     # Start training
-    print("Starting Enhanced U-Net with SE blocks training...")
+    print("Starting U-Net with Non-Local blocks and SE blocks training...")
+    
+    # Print Non-Local block configuration
+    if config['model']['nl_blocks'].get('use_nl_blocks', True):
+        print("Non-Local block configuration:")
+        print(f"  Mode: {config['model']['nl_blocks'].get('nl_mode', 'embedded')}")
+        print(f"  Encoder layers: {config['model']['nl_blocks'].get('nl_encoder_layers', [-1])}")
+        print(f"  Decoder layers: {config['model']['nl_blocks'].get('nl_decoder_layers', [0])}")
+        print(f"  Reduction ratio: {config['model']['nl_blocks'].get('nl_reduction_ratio', 2)}")
+        print(f"  Using in bottleneck: {config['model']['nl_blocks'].get('nl_in_bottleneck', True)}")
+    else:
+        print("Non-Local blocks disabled")
+    
     trainer.fit(model, data_module, ckpt_path=args.resume)
     
     # Print information about the best model
-    print(f"Training completed. Best model saved at: {best_model_dir}/unet_residual_se-best.ckpt")
+    print(f"Training completed. Best model saved at: {best_model_dir}/unet_residual_nl_se-best.ckpt")
     print(f"Best validation loss: {trainer.callback_metrics.get('val_loss', 0):.6f}")
 
     # Clean up resources

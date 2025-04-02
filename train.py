@@ -8,6 +8,13 @@ from utils.utils_general import load_config
 from models.unet import UNet
 from data.mel_spectrogram_dataset import MelSpectrogramDataModule
 
+def cleanup():
+    """
+    Clean up resources when the program is finished.
+    """
+    from utils.utils_datasets import H5FileManager
+    H5FileManager.get_instance().close_all()
+    print("Cleaned up H5 file resources")
 
 def main():
     """
@@ -115,6 +122,8 @@ def main():
     print(f"Training completed. Best model saved at: {trainer.checkpoint_callback.best_model_path}")
     print(f"Best validation loss: {trainer.checkpoint_callback.best_model_score:.6f}")
 
-
+    # Clean up resources
+    cleanup()
+    
 if __name__ == "__main__":
     main()

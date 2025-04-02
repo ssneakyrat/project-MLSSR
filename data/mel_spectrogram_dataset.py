@@ -5,11 +5,12 @@ import numpy as np
 import pytorch_lightning as pl
 from utils.utils_transform import normalize_mel_spectrogram, pad_or_truncate_mel
 from torch.utils.data import DataLoader, random_split
-from utils.utils_datasets import load_dataset
+from utils.utils_datasets import load_dataset, H5FileManager
+import h5py
 
 class MelSpectrogramDataset(Dataset):
     """
-    Dataset for mel spectrogram reconstruction.
+    Dataset for mel spectrogram reconstruction with lazy loading support.
     """
     def __init__(self, data_items, target_length=128, target_bins=80):
         """
@@ -28,8 +29,13 @@ class MelSpectrogramDataset(Dataset):
         self.valid_items = []
         for item in data_items:
             if 'mel_spec' in item and item['mel_spec'] is not None:
-                # Store the original shape for debugging
-                item['original_shape'] = item['mel_spec'].shape
+                # For lazy loading, we'll get the shape without loading all data
+                if isinstance(item['mel_spec'], h5py.Dataset):
+                    item['original_shape'] = item['mel_spec'].shape
+                else:
+                    # Already loaded, get shape directly
+                    item['original_shape'] = item['mel_spec'].shape
+                    
                 self.valid_items.append(item)
         
         if len(self.valid_items) == 0:
@@ -61,7 +67,7 @@ class MelSpectrogramDataset(Dataset):
     
     def __getitem__(self, idx):
         """
-        Get an item from the dataset.
+        Get an item from the dataset with lazy loading support.
         
         Args:
             idx (int): Index
@@ -73,8 +79,13 @@ class MelSpectrogramDataset(Dataset):
         # Get the data item
         item = self.valid_items[idx]
         
-        # Get mel spectrogram
-        mel_spec = item['mel_spec']
+        # Get mel spectrogram - check if it's a reference or actual data
+        if isinstance(item['mel_spec'], h5py.Dataset):
+            # Lazy loading - only load the data now
+            mel_spec = item['mel_spec'][:]
+        else:
+            # Data already loaded
+            mel_spec = item['mel_spec']
         
         # Ensure mel_spec is in the right orientation (F, T) where F=frequency bins, T=time frames
         # In our case, we want shape (80, T) where 80 is the number of mel bins
@@ -110,7 +121,7 @@ def collate_fn(batch):
 
 class MelSpectrogramDataModule(pl.LightningDataModule):
     """
-    PyTorch Lightning DataModule for mel spectrogram dataset.
+    PyTorch Lightning DataModule for mel spectrogram dataset with improved caching.
     """
     def __init__(self, config):
         """
@@ -130,9 +141,12 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
         self.target_length = config['model'].get('time_frames', 128)
         self.target_bins = config['model'].get('mel_bins', 80)
         
-        # Track dataset instances
+        # Track dataset instances and cache
         self.train_dataset = None
         self.val_dataset = None
+        self.data_items = None  # Cache for loaded data
+        self.train_items = None  # Cache for train split
+        self.val_items = None    # Cache for val split
         
     def prepare_data(self):
         """
@@ -144,54 +158,66 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
         
     def setup(self, stage=None):
         """
-        Setup train/val/test datasets.
+        Setup train/val/test datasets with caching to prevent reloading.
         This method is called on every GPU.
         
         Args:
             stage (str, optional): 'fit', 'validate', 'test', or 'predict'
         """
-        # Load all data items
-        data_items = load_dataset(split='train', shuffle=True)
-        
-        if len(data_items) == 0:
-            raise ValueError("No data items found. Make sure the dataset is properly prepared.")
-        
-        # Filter items to only include those with mel spectrograms
-        valid_items = []
-        for item in data_items:
-            if 'mel_spec' in item and item['mel_spec'] is not None:
-                valid_items.append(item)
-        
-        if len(valid_items) == 0:
-            raise ValueError("No valid items with mel spectrograms found in the dataset. Check preprocessing.")
+        # Load data items only once
+        if self.data_items is None:
+            self.data_items = load_dataset(split='train', shuffle=True, lazy_load=True)
             
-        print(f"Found {len(valid_items)} valid items with mel spectrograms out of {len(data_items)} total items.")
+            if len(self.data_items) == 0:
+                raise ValueError("No data items found. Make sure the dataset is properly prepared.")
+            
+            # Filter items to only include those with mel spectrograms
+            valid_items = []
+            for item in self.data_items:
+                if 'mel_spec' in item and item['mel_spec'] is not None:
+                    valid_items.append(item)
+            
+            if len(valid_items) == 0:
+                raise ValueError("No valid items with mel spectrograms found in the dataset. Check preprocessing.")
+                
+            print(f"Found {len(valid_items)} valid items with mel spectrograms out of {len(self.data_items)} total items.")
+            
+            # Split into train and validation sets
+            val_size = int(len(valid_items) * self.validation_split)
+            train_size = len(valid_items) - val_size
+            
+            # Create a generator with fixed seed for reproducibility
+            generator = torch.Generator().manual_seed(42)
+            
+            # Only split if we haven't done so already
+            if self.train_items is None or self.val_items is None:
+                split_result = random_split(
+                    valid_items, 
+                    [train_size, val_size],
+                    generator=generator
+                )
+                self.train_items, self.val_items = split_result
         
-        # Split into train and validation sets
-        val_size = int(len(valid_items) * self.validation_split)
-        train_size = len(valid_items) - val_size
-        
-        train_items, val_items = random_split(
-            valid_items, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)  # For reproducibility
-        )
-        
-        # Create dataset instances
-        self.train_dataset = MelSpectrogramDataset(
-            list(train_items), 
-            target_length=self.target_length, 
-            target_bins=self.target_bins
-        )
-        
-        self.val_dataset = MelSpectrogramDataset(
-            list(val_items), 
-            target_length=self.target_length, 
-            target_bins=self.target_bins
-        )
-        
-        print(f"Setup complete. Train dataset: {len(self.train_dataset)} items, "
-              f"Validation dataset: {len(self.val_dataset)} items")
+        # Create datasets if needed based on stage
+        if stage == 'fit' or stage is None:
+            if self.train_dataset is None:
+                print("Creating training dataset...")
+                self.train_dataset = MelSpectrogramDataset(
+                    list(self.train_items), 
+                    target_length=self.target_length, 
+                    target_bins=self.target_bins
+                )
+            
+            if self.val_dataset is None:
+                print("Creating validation dataset...")
+                self.val_dataset = MelSpectrogramDataset(
+                    list(self.val_items), 
+                    target_length=self.target_length, 
+                    target_bins=self.target_bins
+                )
+            
+            print(f"Setup complete. Train dataset: {len(self.train_dataset)} items, "
+                 f"Validation dataset: {len(self.val_dataset)} items")
         
     def train_dataloader(self):
         """
@@ -225,3 +251,14 @@ class MelSpectrogramDataModule(pl.LightningDataModule):
             pin_memory=self.pin_memory,
             collate_fn=collate_fn
         )
+        
+    def teardown(self, stage=None):
+        """
+        Clean up after the training/testing is finished.
+        
+        Args:
+            stage (str, optional): 'fit', 'validate', 'test', or 'predict'
+        """
+        # Close any open H5 files when done
+        if stage == 'fit' or stage is None:
+            H5FileManager.get_instance().close_all()

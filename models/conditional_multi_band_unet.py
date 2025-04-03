@@ -10,6 +10,7 @@ import torchvision
 
 from models.multi_band_unet import MultiBandUNet
 from models.conditioning import ConditioningEncoder
+from models.noise_strategies import NoiseStrategy, NoiseStepStrategy, CyclicalNoiseStrategy
 
 
 class NoiseScheduler:
@@ -131,9 +132,14 @@ class ConditionalMultiBandUNet(pl.LightningModule):
             max_beta=config['conditioning'].get('max_beta', 0.02)
         )
         
+        # Configure noise strategy
+        noise_strategy_type = config['conditioning'].get('noise_strategy', 'step')
+        if noise_strategy_type == 'cyclical':
+            self.noise_strategy = CyclicalNoiseStrategy(config)
+        else:  # 'step' or default
+            self.noise_strategy = NoiseStepStrategy(config)
+        
         # Training parameters
-        self.noise_ramp_steps = config['conditioning'].get('noise_ramp_steps', 10000)
-        self.min_noise_level = config['conditioning'].get('min_noise_level', 0.0)
         self.global_step_counter = 0
         
     def forward(self, x, conditioning=None, timesteps=None):
@@ -220,8 +226,8 @@ class ConditionalMultiBandUNet(pl.LightningModule):
                                             self.config['model']['time_frames']), 
                                             device=self.device)
         
-        # Calculate current noise level
-        noise_level = self._get_current_noise_level()
+        # Calculate current noise level using the selected strategy
+        noise_level = self.noise_strategy.get_noise_level(self.global_step_counter)
         
         # Choose random noise timesteps for each element in the batch
         batch_size = mel_spectrograms.size(0)
@@ -373,7 +379,7 @@ class ConditionalMultiBandUNet(pl.LightningModule):
                 
             # Generate a sample from pure conditioning
             if conditioning is not None:
-                noise_level = self._get_current_noise_level()
+                noise_level = self.noise_strategy.get_noise_level(self.global_step_counter)
                 
                 # Only generate if we're past the initial training phase
                 if noise_level > 0.5:
@@ -449,20 +455,6 @@ class ConditionalMultiBandUNet(pl.LightningModule):
             generated = self(mel, conditioning)
         
         return generated
-    
-    def _get_current_noise_level(self):
-        """
-        Calculate current noise level based on global step
-        
-        Returns value between min_noise_level and 1.0 based on training progress
-        """
-        if self.noise_ramp_steps <= 0:
-            return 1.0
-        
-        progress = min(1.0, self.global_step_counter / self.noise_ramp_steps)
-        noise_level = self.min_noise_level + (1.0 - self.min_noise_level) * progress
-        
-        return noise_level
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""

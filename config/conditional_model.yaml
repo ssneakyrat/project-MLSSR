@@ -1,4 +1,4 @@
-# Configuration for Conditional Multi-Band UNet with Noise Conditioning
+# Configuration for Conditional Multi-Band UNet with Cyclical Noise Strategy
 
 data:
   bin_dir: datasets
@@ -70,16 +70,21 @@ conditioning:
   
   # Noise conditioning parameters
   noise_schedule: "linear"  # 'linear' or 'cosine'
-  noise_steps: 10 #1000
+  noise_steps: 1000 #1000
   min_beta: 0.0001
   max_beta: 0.02
   
-  # Noise level ramp (in steps)
-  # Set how many steps to transition from pure reconstruction to noise conditioning
-  noise_ramp_steps: 10000 #10000
+  # Noise strategy parameters
+  noise_strategy: "cyclical"  # 'step' or 'cyclical'
   
-  # Minimum noise level to start with (0.0 = pure reconstruction)
-  min_noise_level: 0.0 #0.0
+  # Parameters for step strategy (also used as min_noise_level for cyclical)
+  noise_ramp_steps: 10000
+  min_noise_level: 0.2
+  
+  # Parameters specific to cyclical strategy
+  cycle_steps: 2000        # Number of steps in one complete cycle
+  max_noise_level: 1.0     # Maximum noise level in the cycle
+  cycle_mode: "cosine"     # 'cosine' or 'triangular'
 
 train:
   # Reduced batch size for the conditional model
@@ -93,7 +98,7 @@ train:
   lr_factor: 0.8
   validation_split: 0.1
   log_interval: 100
-  save_dir: logs/conditional_multiband_model
+  save_dir: logs/conditional_cyclical_model
   num_workers: 4
   pin_memory: true
   precision: '32-true' #'32-true' '16-mixed'

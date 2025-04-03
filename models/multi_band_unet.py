@@ -67,8 +67,8 @@ class UNetBase(pl.LightningModule):
                 decoder_channels.append(encoder_channels[idx])
             decoder_channels.append(1)
         
-        # Apply scale factor
-        self.encoder_channels = [1] + [int(c * self.scale_factor) for c in encoder_channels]
+        # Apply scale factor - use self.input_channels instead of hardcoded 1
+        self.encoder_channels = [self.input_channels] + [int(c * self.scale_factor) for c in encoder_channels]
         self.bottleneck_channels = int(bottleneck_channels * self.scale_factor)
         self.decoder_channels = [int(c * self.scale_factor) for c in decoder_channels[:-1]] + [1]
         
@@ -696,7 +696,10 @@ class FrequencyBandSplitter(nn.Module):
 
 class MultiBandUNet(UNetResidualDualPath):
     """U-Net model with separate processing paths for different frequency bands"""
-    def __init__(self, config):
+    def __init__(self, config, in_channels=None):
+
+        self.input_channels = in_channels or 1
+
         # Initialize with the parent class first
         super().__init__(config)
         

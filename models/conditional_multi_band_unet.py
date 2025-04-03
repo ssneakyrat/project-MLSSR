@@ -95,8 +95,8 @@ class ConditionalMultiBandUNet(pl.LightningModule):
         self.config = config
         self.save_hyperparameters()
         
-        # Create base UNet model
-        self.unet = MultiBandUNet(config)
+        # Create base UNet model with 2 input channels
+        self.unet = MultiBandUNet(config, in_channels=2)
         
         # Get the number of phonemes from the config
         num_phonemes = len(config['data'].get('phone_map', []))

@@ -610,19 +610,30 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
     def on_save_checkpoint(self, checkpoint):
         """Custom checkpoint handling"""
         if self.vocoder_enabled and self.separate_checkpointing:
-            # Save separate checkpoints for each component
-            unet_state = {k: v for k, v in self.unet.state_dict().items()}
-            gen_state = {k: v for k, v in self.generator.state_dict().items()}
-            mpd_state = {k: v for k, v in self.mpd.state_dict().items()}
-            msd_state = {k: v for k, v in self.msd.state_dict().items()}
+            # Get a directory for saving component checkpoints
+            save_dir = os.path.join(self.logger.log_dir if hasattr(self.logger, 'log_dir') else 'checkpoints', 
+                                'component_checkpoints')
+            os.makedirs(save_dir, exist_ok=True)
             
-            # Save to separate files
-            torch.save(unet_state, f"unet_checkpoint_epoch_{self.current_epoch}.pt")
-            torch.save(gen_state, f"generator_checkpoint_epoch_{self.current_epoch}.pt")
-            torch.save(mpd_state, f"mpd_checkpoint_epoch_{self.current_epoch}.pt")
-            torch.save(msd_state, f"msd_checkpoint_epoch_{self.current_epoch}.pt")
+            # Create a combined checkpoint for all components: UNet, generator, and discriminators
+            combined_state = {
+                'unet': self.unet.state_dict(),
+                'generator': self.generator.state_dict(),
+                'mpd': self.mpd.state_dict(),
+                'msd': self.msd.state_dict(),
+                'epoch': self.current_epoch,
+                'val_loss': self.trainer.callback_metrics.get('val_loss', float('inf')) if hasattr(self, 'trainer') else float('inf')
+            }
             
-            print(f"Saved separate component checkpoints at epoch {self.current_epoch}")
+            # Always save a copy with the current best
+            current_val_loss = combined_state['val_loss']
+            if not hasattr(self, '_best_val_loss') or current_val_loss < getattr(self, '_best_val_loss', float('inf')):
+                self._best_val_loss = current_val_loss
+                best_filepath = os.path.join(save_dir, "complete_model_best.pt")
+                torch.save(combined_state, best_filepath)
+                print(f"New best model (val_loss={current_val_loss:.6f})! Saved all components to {best_filepath}")
+            
+            print(f"Saved complete model checkpoint (UNet + vocoder) to TensorBoard directory")
     
     def on_load_checkpoint(self, checkpoint):
         """Custom checkpoint loading"""

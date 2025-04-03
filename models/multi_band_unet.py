@@ -718,8 +718,9 @@ class MultiBandUNet(UNetResidualDualPath):
         self._setup_band_specific_paths()
         
         # Create fusion module to combine full-spectrum and band-specific outputs
+        # IMPORTANT CHANGE: Use self.input_channels to determine fusion module input channels
         self.fusion = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),  # Changed from (num_bands + 1) to 2
+            nn.Conv2d(self.input_channels * 2, 16, kernel_size=3, padding=1),  # Adjust for input channels
             nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
             nn.Conv2d(16, 1, kernel_size=1),
@@ -735,8 +736,8 @@ class MultiBandUNet(UNetResidualDualPath):
         
         # Configuration for band-specific paths
         # We'll make them simpler than the main path
-        # IMPORTANT: First channel is 1 (the input has 1 channel), then follow reduced progression
-        reduced_encoder_channels = [1] + [max(16, c // 2) for c in self.encoder_channels[1:]]
+        # IMPORTANT CHANGE: Use self.input_channels instead of hardcoding 1
+        reduced_encoder_channels = [self.input_channels] + [max(16, c // 2) for c in self.encoder_channels[1:]]
         reduced_bottleneck_channels = max(32, self.bottleneck_channels // 2)
         reduced_decoder_channels = [max(16, c // 2) for c in self.decoder_channels[:-1]] + [1]
         

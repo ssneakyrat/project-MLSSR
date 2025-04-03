@@ -311,7 +311,7 @@ class ConditionalMultiBandUNet(pl.LightningModule):
         
         if mask is not None:
             denoise_loss = F.mse_loss(denoised * mask, mel_spectrograms * mask, reduction='sum')
-            denoise_loss = denoise_loss / (mask.sum() + 1e-8)
+            denoise_loss = denoise_loss / (mask.sum() + 1e-6)  # Increase from 1e-8
         else:
             denoise_loss = F.mse_loss(denoised, mel_spectrograms)
         

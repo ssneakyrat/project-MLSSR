@@ -147,7 +147,7 @@ def main():
         LearningRateMonitor(logging_interval='epoch'),
         EarlyStopping(
             monitor='val_loss',
-            patience=20,
+            patience=100,
             mode='min'
         ),
     ]

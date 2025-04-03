@@ -6,7 +6,7 @@ data:
   data_key: mel_spectrograms
   lazy_load: true
   raw_dir: datasets/gin
-  max_samples: 10
+  max_samples: 20
   sample_percentage: null
   variable_length: true
   
@@ -79,7 +79,7 @@ conditioning:
   noise_ramp_steps: 10000
   
   # Minimum noise level to start with (0.0 = pure reconstruction)
-  min_noise_level: 0.0
+  min_noise_level: 0.0 #0.0
 
 train:
   # Reduced batch size for the conditional model
@@ -96,7 +96,7 @@ train:
   save_dir: logs/conditional_multiband_model
   num_workers: 4
   pin_memory: true
-  precision: '16-mixed' #'32-true' '16-mixed'
+  precision: '32-true' #'32-true' '16-mixed'
   
 validation:
   val_every_epoch: 2

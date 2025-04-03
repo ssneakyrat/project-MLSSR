@@ -41,6 +41,38 @@ class UNetBase(pl.LightningModule):
         # Initialize weights
         self._init_weights()
         
+    def _prepare_batch_input(self, batch):
+        """
+        Handle different batch formats to extract mel spectrograms
+        - For MelAudioDataset: batch is (mel_spec, audio) or ((mel_spec, audio), (mel_mask, audio_mask))
+        - For standard dataset: batch is just mel_spec or (mel_spec, mel_mask)
+        """
+        if isinstance(batch, (list, tuple)):
+            # Check if this is from MelAudioDataset
+            if len(batch) == 2:
+                # This could be (mel, audio) or (data, mask)
+                first_item = batch[0]
+                if isinstance(first_item, (list, tuple)) and len(first_item) == 2:
+                    # This is ((mel, audio), (mask_mel, mask_audio))
+                    mel_input = first_item[0]
+                    return mel_input
+                
+                # Check if the second item is likely audio (much longer than mel frames)
+                # as a heuristic to distinguish (mel, audio) from (mel, mask)
+                if isinstance(first_item, torch.Tensor) and isinstance(batch[1], torch.Tensor):
+                    if first_item.dim() > 2 and batch[1].dim() <= 2:
+                        # Second item is likely a mask
+                        return first_item
+                    elif first_item.shape[-1] * 10 < batch[1].shape[-1]:
+                        # Second item is much longer, likely audio
+                        return first_item
+                
+                # Default case for (mel, audio)
+                return batch[0]
+        
+        # Just return the batch as is if it's already in the right format
+        return batch
+
     def _setup_channels(self):
         # Define channel progression based on layer count
         if self.layer_count <= 6:
@@ -91,24 +123,16 @@ class UNetBase(pl.LightningModule):
         raise NotImplementedError
     
     def training_step(self, batch, batch_idx):
-        # Handle different batch formats
-        if isinstance(batch, list):
-            print(f"Training batch is a list of length {len(batch)}")
-            if len(batch) > 0:
-                x = batch[0]
-                y = batch[0]  # For reconstruction task, input=target
-            else:
-                print("Empty batch list, cannot proceed with training")
-                # Return a dummy loss that can be backpropagated
-                return torch.tensor(1.0, requires_grad=True, device=self.device)
-        else:
-            x = batch
-            y = batch
+        # Extract mel spectrogram from the batch
+        x = self._prepare_batch_input(batch)
         
         # Ensure we have tensors
         if not isinstance(x, torch.Tensor):
             print(f"Training input is not a tensor: {type(x)}")
             return torch.tensor(1.0, requires_grad=True, device=self.device)
+        
+        # Use the input as both input and target for the U-Net
+        y = x
         
         # Forward pass
         try:
@@ -118,10 +142,8 @@ class UNetBase(pl.LightningModule):
             # Return a dummy loss that can be backpropagated
             return torch.tensor(1.0, requires_grad=True, device=self.device)
         
-        # If there's masked_loss logic, apply it safely
+        # Calculate loss
         try:
-            # Instead of using potentially mismatched masks, just use the unmasked loss
-            # This is a simpler approach that avoids dimension mismatches
             loss = self.loss_fn(y_pred, y)
             
             # Log the loss
@@ -136,23 +158,16 @@ class UNetBase(pl.LightningModule):
             return torch.tensor(1.0, requires_grad=True, device=self.device)
     
     def validation_step(self, batch, batch_idx):
-        # Handle different batch formats
-        if isinstance(batch, list):
-            print(f"Validation batch is a list of length {len(batch)}")
-            if len(batch) > 0:
-                x = batch[0]
-                y = batch[0]  # For reconstruction task, input=target
-            else:
-                print("Empty batch list, cannot proceed with validation")
-                return None
-        else:
-            x = batch
-            y = batch
+        # Extract mel spectrogram from the batch
+        x = self._prepare_batch_input(batch)
         
         # Ensure we have tensors
         if not isinstance(x, torch.Tensor):
             print(f"Validation input is not a tensor: {type(x)}")
             return None
+        
+        # Use the input as both input and target for the U-Net
+        y = x
         
         # Forward pass
         try:
@@ -161,7 +176,7 @@ class UNetBase(pl.LightningModule):
             print(f"Error in forward pass during validation: {e}")
             return None
         
-        # Calculate loss (with safety checks)
+        # Calculate loss
         try:
             # Ensure dimensions match
             if y_pred.shape != y.shape:

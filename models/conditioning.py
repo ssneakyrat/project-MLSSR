@@ -160,7 +160,7 @@ class ConditioningEncoder(nn.Module):
         )
         
     def forward(self, phoneme_ids=None, phoneme_durations=None, 
-                midi_pitch=None, f0=None, mel_shape=None):
+            midi_pitch=None, f0=None, mel_shape=None):
         """
         Args:
             phoneme_ids: Tensor of shape [batch_size, max_phonemes]
@@ -183,11 +183,39 @@ class ConditioningEncoder(nn.Module):
             pitch_features = self.pitch_encoder(midi_pitch, f0)
             features.append(pitch_features)
         
-        # Combine all features
+        # Combine all features with alignment handling
         if len(features) > 1:
-            x = self.combiner(torch.cat(features, dim=1))
-        else:
+            # First ensure all features have the same time dimension
+            target_length = max(f.shape[2] for f in features)
+            
+            # Align features to have the same time dimension
+            aligned_features = []
+            for f in features:
+                if f.shape[2] != target_length:
+                    # Use interpolation to match the target length
+                    aligned_f = F.interpolate(
+                        f, 
+                        size=target_length, 
+                        mode='linear', 
+                        align_corners=False
+                    )
+                    aligned_features.append(aligned_f)
+                else:
+                    aligned_features.append(f)
+            
+            # Now combine the aligned features
+            x = self.combiner(torch.cat(aligned_features, dim=1))
+        elif len(features) == 1:
             x = features[0]
+        else:
+            # Handle the case where no features are available
+            if mel_shape is not None:
+                # Create empty features matching the target shape
+                freq_bins, time_frames = mel_shape
+                batch_size = 1  # Default batch size when no features
+                x = torch.zeros(batch_size, self.hidden_dim, time_frames, device=phoneme_ids.device if phoneme_ids is not None else 'cpu')
+            else:
+                raise ValueError("No conditioning features provided and no mel_shape specified")
         
         # If no mel_shape is provided, return 1D features
         if mel_shape is None:
@@ -197,6 +225,15 @@ class ConditioningEncoder(nn.Module):
         freq_bins, time_frames = mel_shape
         batch_size = x.size(0)
         hidden_dim = x.size(1)
+        
+        # Make sure our features match the target time frames
+        if x.shape[2] != time_frames:
+            x = F.interpolate(
+                x, 
+                size=time_frames, 
+                mode='linear', 
+                align_corners=False
+            )
         
         # Use frequency projection to get features for each frequency bin
         freq_features = self.freq_projection(x)  # [B, H*2, F]

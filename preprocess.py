@@ -92,6 +92,61 @@ def time_to_frame(time_htk, sample_rate, hop_length):
     
     return int(frame_index)
 
+def frequency_to_midi_pitch(frequency):
+    """
+    Convert frequency (Hz) to MIDI pitch number
+    
+    Args:
+        frequency: Frequency in Hz
+        
+    Returns:
+        MIDI pitch number (0-127)
+    """
+    if frequency <= 0:
+        return 0  # MIDI note 0 for silence or undefined
+    
+    # Formula to convert frequency to MIDI pitch
+    midi_pitch = 69 + 12 * math.log2(frequency / 440.0)
+    
+    # Constrain to valid MIDI range (0-127)
+    midi_pitch = max(0, min(127, int(round(midi_pitch))))
+    
+    return midi_pitch
+
+def calculate_phoneme_pitches(frame_starts, frame_ends, f0_values):
+    """
+    Calculate average MIDI pitch for each phoneme based on F0 values
+    
+    Args:
+        frame_starts: Array of phoneme start frames
+        frame_ends: Array of phoneme end frames
+        f0_values: F0 values aligned with frames
+        
+    Returns:
+        Array of MIDI pitch values for each phoneme
+    """
+    midi_pitches = []
+    
+    for start, end in zip(frame_starts, frame_ends):
+        # Get F0 values for this phoneme duration
+        phoneme_f0 = f0_values[start:end]
+        
+        # Filter out zero values (unvoiced)
+        voiced_f0 = phoneme_f0[phoneme_f0 > 0]
+        
+        if len(voiced_f0) > 0:
+            # Calculate average F0 for voiced segments
+            avg_f0 = np.mean(voiced_f0)
+            # Convert to MIDI pitch
+            midi_pitch = frequency_to_midi_pitch(avg_f0)
+        else:
+            # Unvoiced phoneme
+            midi_pitch = 0
+        
+        midi_pitches.append(midi_pitch)
+    
+    return np.array(midi_pitches, dtype=np.int16)
+
 def extract_f0_aligned(wav_path, config, mel_spec_length=None):
     """
     Extract F0 values aligned with mel spectrogram time frames
@@ -419,6 +474,13 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
             dtype=h5py.vlen_dtype(h5py.special_dtype(vlen=str))
         )
         
+        # Add new dataset for MIDI pitch values
+        midi_pitches = f.create_dataset(
+            'MIDI_PITCH',
+            shape=(valid_items,),
+            dtype=h5py.vlen_dtype(np.int16)
+        )
+        
         # Dataset for F0 values
         f0_dataset = f.create_dataset(
             'f0_values',
@@ -485,6 +547,12 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
                             padded_f0[:len(f0)] = f0
                             f0 = padded_f0
                         
+                        # Calculate MIDI pitch for each phoneme based on F0
+                        midi_pitch_values = calculate_phoneme_pitches(frame_starts, frame_ends, f0)
+                        
+                        # Store MIDI pitch values
+                        midi_pitches[idx] = midi_pitch_values
+                        
                         # Pad to max_length
                         if len(f0) < max_length:
                             padded = np.zeros(max_length, dtype=np.float32)
@@ -493,6 +561,8 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
                     else:
                         # Create empty F0 values
                         f0 = np.zeros(max_length, dtype=np.float32)
+                        # Create empty MIDI pitch values (all zeros)
+                        midi_pitches[idx] = np.zeros(len(frame_starts), dtype=np.int16)
                     
                     # Store F0 values
                     f0_dataset[idx] = f0
@@ -542,7 +612,7 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
                 pbar.update(1)
     
     logger.info(f"Saved {idx} mel spectrograms to {output_path} with variable length support")
-    logger.info(f"Added frame-aligned phoneme boundaries and F0 values")
+    logger.info(f"Added frame-aligned phoneme boundaries, F0 values, and MIDI pitch values")
     
     # Log alignment statistics if verification was enabled
     if verify_alignment and alignment_stats['total_files'] > 0:
@@ -588,7 +658,7 @@ def main():
     parser.add_argument('--variable_length', action='store_true', help='Enable variable length mel spectrograms')
     parser.add_argument('--max_audio_length', type=float, default=None, help='Maximum audio length in seconds')
     parser.add_argument('--verify_alignment', action='store_true', help='Verify phoneme-to-frame alignment')
-    parser.add_argument('-- ', action='store_true', help='Generate alignment visualizations')
+    parser.add_argument('--visualize_alignment', action='store_true', help='Generate alignment visualizations')
     parser.add_argument('--alignment_vis_dir', type=str, default='alignment_viz', help='Directory for alignment visualizations')
     args = parser.parse_args()
     

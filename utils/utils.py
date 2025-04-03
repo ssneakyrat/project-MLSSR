@@ -146,7 +146,18 @@ def extract_mel_spectrogram_variable_length(wav_path, config):
         print(f"Error extracting variable-length mel spectrogram from {wav_path}: {e}")
         return None
 
-def extract_f0(wav_path, config, convert_to_midi=True):
+def extract_f0(wav_path, config, convert_to_midi=False):
+    """
+    Extract F0 (fundamental frequency) from audio file.
+    
+    Args:
+        wav_path: Path to the audio file
+        config: Configuration dictionary
+        convert_to_midi: Whether to convert F0 values to MIDI pitch
+        
+    Returns:
+        Array of F0 values (in Hz by default, or MIDI pitch if convert_to_midi=True)
+    """
     try:
         y, sr = librosa.load(wav_path, sr=config['audio']['sample_rate'])
         
@@ -155,6 +166,7 @@ def extract_f0(wav_path, config, convert_to_midi=True):
         max_samples = int(max_audio_length * sr)
         
         if len(y) > max_samples:
+            print(f"Warning: Audio file {wav_path} exceeds maximum length of {max_audio_length}s. Truncating.")
             y = y[:max_samples]
         
         f0, voiced_flag, voiced_probs = librosa.pyin(

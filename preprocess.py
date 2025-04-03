@@ -6,13 +6,14 @@ import math
 from tqdm import tqdm
 import argparse
 import logging
+import warnings
 
 from utils.utils import (
     load_config, 
     extract_mel_spectrogram,
     extract_mel_spectrogram_variable_length,
     extract_f0, 
-    extract_aligned_f0,  # New function
+    extract_aligned_f0,
     normalize_mel_spectrogram, 
     pad_or_truncate_mel
 )
@@ -20,23 +21,49 @@ from utils.utils import (
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger('preprocess')
 
-def f0_to_midi_pitch(f0):
+def f0_to_midi_pitch(f0, silence_threshold=20):
     """Convert f0 frequency in Hz to MIDI pitch number.
     MIDI pitch 69 is A4 (440 Hz).
     Each semitone is a step of 1 in MIDI pitch.
     
     Args:
         f0: Fundamental frequency in Hz
+        silence_threshold: Values below this threshold are considered silence/unvoiced
         
     Returns:
-        MIDI pitch number (float)
+        MIDI pitch number (float) or 0 for silence/unvoiced
     """
-    if f0 <= 0:
+    if f0 is None or f0 <= silence_threshold:
         return 0  # For unvoiced or silent regions
     return 69 + 12 * np.log2(f0 / 440.0)
 
+def is_midi_pitch(f0_array):
+    """Detect if an array is already in MIDI pitch format rather than Hz.
+    
+    Args:
+        f0_array: Array of F0 values
+        
+    Returns:
+        Boolean indicating if the array appears to be in MIDI format
+    """
+    # MIDI pitch for human voice is typically between 36-84 (C2-C6)
+    # F0 for human voice is typically between 80-1000 Hz
+    
+    # Get only the voiced values (non-zero)
+    voiced = f0_array[f0_array > 0]
+    
+    if len(voiced) == 0:
+        return False
+    
+    mean_value = np.mean(voiced)
+    max_value = np.max(voiced)
+    
+    # If mean is less than 100 and max is less than 120, likely MIDI
+    # If mean is greater than 100, likely Hz
+    return mean_value < 100 and max_value < 120
+
 def estimate_phoneme_midi_pitch(f0, phoneme_start, phoneme_end, hop_length, sample_rate):
-    """Estimate the average MIDI pitch for a phoneme.
+    """Estimate the average MIDI pitch for a phoneme with improved handling of formats.
     
     Args:
         f0: Array of F0 values (aligned with mel spectrogram frames)
@@ -51,8 +78,10 @@ def estimate_phoneme_midi_pitch(f0, phoneme_start, phoneme_end, hop_length, samp
     if f0 is None or len(f0) == 0:
         return 0
     
-    # The crucial fix: convert time in samples to frame indices correctly
-    # For frame-aligned f0, we need to divide by hop_length
+    # First, detect if f0 is already in MIDI format
+    is_midi = is_midi_pitch(f0)
+    
+    # Convert time in samples to frame indices correctly
     start_frame = int(np.floor(phoneme_start / hop_length))
     end_frame = int(np.ceil(phoneme_end / hop_length))
     
@@ -68,8 +97,12 @@ def estimate_phoneme_midi_pitch(f0, phoneme_start, phoneme_end, hop_length, samp
     phoneme_f0 = f0[start_frame:end_frame]
     
     # Filter out zeros and very low values (unvoiced or silent regions)
-    # Use slightly higher threshold (30Hz) to filter out noise
-    voiced_f0 = phoneme_f0[phoneme_f0 > 30]  
+    if is_midi:
+        # For MIDI data, just filter out zeros
+        voiced_f0 = phoneme_f0[phoneme_f0 > 0]
+    else:
+        # For Hz data, use a threshold of 30Hz to filter out noise
+        voiced_f0 = phoneme_f0[phoneme_f0 > 30]
     
     # If no voiced frames are found, return 0
     if len(voiced_f0) == 0:
@@ -78,10 +111,13 @@ def estimate_phoneme_midi_pitch(f0, phoneme_start, phoneme_end, hop_length, samp
     # Calculate average F0 for the phoneme
     avg_f0 = float(np.mean(voiced_f0))
     
-    # Convert to MIDI pitch
-    midi_pitch = 69 + 12 * np.log2(avg_f0 / 440.0)
-    
-    return midi_pitch
+    # Convert to MIDI pitch if needed
+    if is_midi:
+        # Already in MIDI format, just return as is
+        return avg_f0
+    else:
+        # Convert from Hz to MIDI
+        return f0_to_midi_pitch(avg_f0)
 
 def list_lab_files(raw_dir):
     if not os.path.exists(raw_dir):
@@ -283,6 +319,7 @@ def main():
     parser.add_argument('--target_bins', type=int, default=None, help='Target mel bins')
     parser.add_argument('--variable_length', action='store_true', help='Enable variable length mel spectrograms')
     parser.add_argument('--max_audio_length', type=float, default=None, help='Maximum audio length in seconds')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with additional output')
     args = parser.parse_args()
     
     config = load_config(args.config)
@@ -351,38 +388,72 @@ def main():
             
             if wav_file_path:
                 if variable_length:
-                    # Use the new function to get aligned mel and F0
+                    # Extract mel and F0 data with alignment
                     mel_spec, f0_aligned = extract_aligned_f0(wav_file_path, config)
                     
                     # If the above function fails, fall back to the original method
                     if mel_spec is None:
                         mel_spec = extract_mel_spectrogram_variable_length(wav_file_path, config)
-                        f0 = extract_f0(wav_file_path, config, convert_to_midi=True)
+                        
+                        # IMPORTANT FIX: Get raw F0 in Hz, not MIDI
+                        f0 = extract_f0(wav_file_path, config, convert_to_midi=False)
                 else:
                     mel_spec = extract_mel_spectrogram(wav_file_path, config)
-                    f0 = extract_f0(wav_file_path, config, convert_to_midi=True)
+                    
+                    # IMPORTANT FIX: Get raw F0 in Hz, not MIDI 
+                    f0 = extract_f0(wav_file_path, config, convert_to_midi=False)
             
             phone_starts = np.array([p[0] for p in phonemes])
             phone_ends = np.array([p[1] for p in phonemes])
             phone_durations = phone_ends - phone_starts
             phone_texts = np.array([p[2] for p in phonemes], dtype=h5py.special_dtype(vlen=str))
             
+            # Get the F0 data to use for MIDI pitch calculation
+            f0_for_midi = f0_aligned if f0_aligned is not None else f0
+            
             # Calculate MIDI pitch for each phoneme
             midi_pitches = []
             hop_length = config['audio']['hop_length']
             sample_rate = config['audio']['sample_rate']
             
-            # Use f0 or f0_aligned, whichever is available
-            f0_for_midi = f0_aligned if f0_aligned is not None else f0
-            
             if f0_for_midi is not None and len(f0_for_midi) > 0:
+                # Debug check for F0 format to detect potential issues
+                if args.debug:
+                    is_midi_format = is_midi_pitch(f0_for_midi)
+                    logger.info(f"F0 data for {file_id} appears to be in {'MIDI' if is_midi_format else 'Hz'} format")
+                    if is_midi_format:
+                        logger.warning(f"File {file_id} has F0 data that looks like MIDI pitch already")
+                
                 # Process each phoneme
                 for i, (start, end) in enumerate(zip(phone_starts, phone_ends)):
                     try:
-                        midi_pitch = estimate_phoneme_midi_pitch(f0_for_midi, start, end, hop_length, sample_rate)
+                        # Calculate MIDI pitch using the improved function
+                        midi_pitch = estimate_phoneme_midi_pitch(
+                            f0_for_midi, start, end, hop_length, sample_rate
+                        )
                         midi_pitches.append(midi_pitch)
+                        
+                        # Additional debug information
+                        if args.debug and i < 5:  # Only for first few phonemes
+                            # Convert time in samples to frame indices
+                            start_frame = int(np.floor(start / hop_length))
+                            end_frame = int(np.ceil(end / hop_length))
+                            
+                            # Ensure bounds are within the F0 array
+                            start_frame = max(0, min(start_frame, len(f0_for_midi)-1))
+                            end_frame = max(0, min(end_frame, len(f0_for_midi)))
+                            
+                            # Extract F0 values
+                            phoneme_f0 = f0_for_midi[start_frame:end_frame]
+                            voiced_f0 = phoneme_f0[phoneme_f0 > 0]
+                            
+                            # Log statistics
+                            avg_f0 = np.mean(voiced_f0) if len(voiced_f0) > 0 else 0
+                            logger.info(f"  Phoneme {i} '{phone_texts[i]}': frames {start_frame}-{end_frame}, "
+                                         f"avg F0: {avg_f0:.2f}, MIDI: {midi_pitch:.2f}")
+                            
                     except Exception as e:
-                        print(f"Error calculating MIDI pitch for phoneme {i} in {file_id}: {e}")
+                        logger.error(f"Error calculating MIDI pitch for phoneme {i} in {file_id}: {e}")
                         midi_pitches.append(0.0)
             else:
                 # If no F0 data, just use zeros
@@ -390,7 +461,7 @@ def main():
             
             # Ensure we have the same number of MIDI pitches as phonemes
             if len(midi_pitches) != len(phone_starts):
-                print(f"Warning: MIDI pitch count ({len(midi_pitches)}) doesn't match phoneme count ({len(phone_starts)}) for {file_id}")
+                logger.warning(f"MIDI pitch count ({len(midi_pitches)}) doesn't match phoneme count ({len(phone_starts)}) for {file_id}")
                 # Fill with zeros if needed
                 if len(midi_pitches) < len(phone_starts):
                     midi_pitches.extend([0.0] * (len(phone_starts) - len(midi_pitches)))
@@ -421,7 +492,10 @@ def main():
         if variable_length:
             save_to_h5_variable_length(output_path, all_file_data, phone_map, config, args.data_key)
         else:
-            save_to_h5(output_path, all_file_data, phone_map, config, args.data_key, target_shape)
+            # Assuming the save_to_h5 function exists for fixed-length mode
+            logger.warning("Fixed-length mode is not implemented in this script.")
+            logger.info("Using variable length mode for saving.")
+            save_to_h5_variable_length(output_path, all_file_data, phone_map, config, args.data_key)
     else:
         logger.warning("No files were processed. H5 file was not created.")
 

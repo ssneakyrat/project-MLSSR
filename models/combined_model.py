@@ -512,6 +512,11 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
         if not self.vocoder_enabled:
             return
         
+        # Create a single fixed directory for audio samples (no epoch-specific subdirectories)
+        audio_dir = os.path.join(self.logger.log_dir if hasattr(self.logger, 'log_dir') else 'validation_audio', 
+                                'latest_samples')
+        os.makedirs(audio_dir, exist_ok=True)
+        
         # Select random samples
         max_samples = min(max_samples, audio_target.size(0))
         indices = torch.randperm(audio_target.size(0))[:max_samples]
@@ -531,9 +536,9 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
             target = target / (np.abs(target).max() + 1e-7)
             output = output / (np.abs(output).max() + 1e-7)
             
-            # Save to temp files and log
-            target_path = f'val_target_{i}_{self.current_epoch}.wav'
-            output_path = f'val_output_{i}_{self.current_epoch}.wav'
+            # Save to files with proper paths - using fixed names to ensure only latest files are kept
+            target_path = os.path.join(audio_dir, f'val_target_{i}.wav')
+            output_path = os.path.join(audio_dir, f'val_output_{i}.wav')
             
             # Specify dtype explicitly when writing audio
             sf.write(target_path, target, sample_rate, subtype='FLOAT')
@@ -632,7 +637,7 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
                 self._best_val_loss = current_val_loss
                 best_filepath = os.path.join(save_dir, "complete_model_best.pt")
                 torch.save(combined_state, best_filepath)
-                print(f"New best model (val_loss={current_val_loss:.6f})! Saved all components to {best_filepath}")
+                #print(f"New best model (val_loss={current_val_loss:.6f})! Saved all components to {best_filepath}")
             
             #print(f"Saved complete model checkpoint (UNet + vocoder) to TensorBoard directory")
     

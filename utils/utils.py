@@ -146,7 +146,7 @@ def extract_mel_spectrogram_variable_length(wav_path, config):
         print(f"Error extracting variable-length mel spectrogram from {wav_path}: {e}")
         return None
 
-def extract_f0(wav_path, config):
+def extract_f0(wav_path, config, convert_to_midi=True):
     try:
         y, sr = librosa.load(wav_path, sr=config['audio']['sample_rate'])
         
@@ -166,6 +166,21 @@ def extract_f0(wav_path, config):
         )
         
         f0 = np.nan_to_num(f0)
+        
+        # Convert from Hz to MIDI pitch if requested
+        if convert_to_midi:
+            # Zero out unvoiced segments first (avoid log of zero)
+            f0_for_conversion = f0.copy()
+            f0_for_conversion[f0_for_conversion == 0] = 1e-5  # Avoid log(0)
+            
+            # Convert to MIDI pitch
+            midi_pitch = 69 + 12 * np.log2(f0_for_conversion / 440.0)
+            
+            # Zero out unvoiced segments in the result
+            midi_pitch[f0 == 0] = 0
+            
+            return midi_pitch
+        
         return f0
         
     except Exception as e:

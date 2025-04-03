@@ -357,10 +357,10 @@ def main():
                     # If the above function fails, fall back to the original method
                     if mel_spec is None:
                         mel_spec = extract_mel_spectrogram_variable_length(wav_file_path, config)
-                        f0 = extract_f0(wav_file_path, config)
+                        f0 = extract_f0(wav_file_path, config, convert_to_midi=True)
                 else:
                     mel_spec = extract_mel_spectrogram(wav_file_path, config)
-                    f0 = extract_f0(wav_file_path, config)
+                    f0 = extract_f0(wav_file_path, config, convert_to_midi=True)
             
             phone_starts = np.array([p[0] for p in phonemes])
             phone_ends = np.array([p[1] for p in phonemes])

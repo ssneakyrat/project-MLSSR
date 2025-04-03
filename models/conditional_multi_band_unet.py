@@ -206,8 +206,8 @@ class ConditionalMultiBandUNet(pl.LightningModule):
         1. Reconstruct clean spectrograms from noisy ones (early training)
         2. Gradually increase noise to transition to generation
         """
-        # Unpack the batch
-        if isinstance(batch, tuple) and len(batch) >= 1:
+        # Unpack the batch - handle both tuples and lists
+        if isinstance(batch, (tuple, list)) and len(batch) >= 1:
             mel_spectrograms = batch[0]
             conditioning = batch[1] if len(batch) > 1 else None
             mask = batch[2] if len(batch) > 2 else None
@@ -273,8 +273,20 @@ class ConditionalMultiBandUNet(pl.LightningModule):
         """
         Validation step with both reconstruction and generation evaluation
         """
-        # Unpack the batch
-        if isinstance(batch, tuple) and len(batch) >= 1:
+
+        # Debug the batch contents
+        print(f"Validation batch type: {type(batch)}")
+        if isinstance(batch, tuple):
+            print(f"Batch is a tuple of length {len(batch)}")
+            for i, item in enumerate(batch):
+                if i == 1:  # Conditioning data
+                    if item is None:
+                        print("Conditioning is None")
+                    else:
+                        print(f"Conditioning keys: {item.keys()}")
+                        
+        # Unpack the batch - handle both tuples and lists
+        if isinstance(batch, (tuple, list)) and len(batch) >= 1:
             mel_spectrograms = batch[0]
             conditioning = batch[1] if len(batch) > 1 else None
             mask = batch[2] if len(batch) > 2 else None

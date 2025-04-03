@@ -16,6 +16,75 @@ def load_config(config_path="config/default.yaml"):
         print(f"Error parsing YAML configuration: {e}")
         return {}
 
+# Add this function to utils.py
+
+def extract_aligned_f0(wav_path, config):
+    """
+    Extract F0 values aligned with mel spectrogram frames.
+    
+    Args:
+        wav_path: Path to the audio file
+        config: Configuration dictionary
+        
+    Returns:
+        Tuple of (mel_spectrogram, f0_array) with aligned time dimensions
+    """
+    try:
+        # Load audio
+        y, sr = librosa.load(wav_path, sr=config['audio']['sample_rate'])
+        
+        # Check if audio exceeds maximum length
+        max_audio_length = config['audio'].get('max_audio_length', 10.0)  # Default 10 seconds
+        max_samples = int(max_audio_length * sr)
+        
+        if len(y) > max_samples:
+            print(f"Warning: Audio file {wav_path} exceeds maximum length of {max_audio_length}s. Truncating.")
+            y = y[:max_samples]
+        
+        # Extract mel spectrogram
+        mel_spec = librosa.feature.melspectrogram(
+            y=y,
+            sr=sr,
+            n_fft=config['audio']['n_fft'],
+            hop_length=config['audio']['hop_length'],
+            win_length=config['audio']['win_length'],
+            n_mels=config['audio']['n_mels'],
+            fmin=config['audio']['fmin'],
+            fmax=config['audio']['fmax'],
+        )
+        
+        mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
+        
+        # Extract F0 with the same hop length as mel spectrogram
+        hop_length = config['audio']['hop_length']
+        f0, voiced_flag, voiced_probs = librosa.pyin(
+            y,
+            fmin=config.get('audio', {}).get('f0_min', 50),
+            fmax=config.get('audio', {}).get('f0_max', 600),
+            sr=sr,
+            hop_length=hop_length,
+            frame_length=config['audio']['win_length']
+        )
+        
+        # Replace NaN values with zeros
+        f0 = np.nan_to_num(f0)
+        
+        # Make sure F0 and mel_spec have exactly the same number of frames
+        time_frames = mel_spec.shape[1]
+        
+        if len(f0) > time_frames:
+            # Truncate F0 to match mel spectrogram
+            f0 = f0[:time_frames]
+        elif len(f0) < time_frames:
+            # Pad F0 with zeros to match mel spectrogram
+            f0 = np.pad(f0, (0, time_frames - len(f0)), 'constant')
+        
+        return mel_spec, f0
+        
+    except Exception as e:
+        print(f"Error extracting aligned F0 from {wav_path}: {e}")
+        return None, None
+    
 def extract_mel_spectrogram(wav_path, config):
     """Extract fixed-length mel spectrogram"""
     try:

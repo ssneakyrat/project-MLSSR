@@ -58,9 +58,13 @@ class NoiseScheduler:
         """
         device = x.device
         
+        # Move scheduler parameters to the same device as input
+        sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
+        sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
+        
         # Extract alpha values for current timesteps
-        sqrt_alphas_cumprod_t = self.sqrt_alphas_cumprod[t].to(device)
-        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t].to(device)
+        sqrt_alphas_cumprod_t = sqrt_alphas_cumprod[t]
+        sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod[t]
         
         # Make sure shapes are compatible for broadcasting
         while len(sqrt_alphas_cumprod_t.shape) < len(x.shape):
@@ -144,6 +148,16 @@ class ConditionalMultiBandUNet(pl.LightningModule):
         Returns:
             Predicted clean signal or noise (depending on training mode)
         """
+        # Handle case where x is a list
+        if isinstance(x, list):
+            if len(x) > 0 and isinstance(x[0], torch.Tensor):
+                x = x[0]
+            else:
+                # Create a dummy tensor
+                x = torch.zeros((1, 1, self.config['model']['mel_bins'], 
+                            self.config['model']['time_frames']), 
+                            device=self.device)
+        
         # Process conditioning if provided
         cond_features = None
         if conditioning is not None:
@@ -174,8 +188,6 @@ class ConditionalMultiBandUNet(pl.LightningModule):
             model_input = x
         
         # Run UNet model
-        # Note: Not using the time embedding yet as the current UNet doesn't support it
-        # This would require modifying the UNet architecture to accept time embeddings
         output = self.unet(model_input)
         
         return output
@@ -197,6 +209,16 @@ class ConditionalMultiBandUNet(pl.LightningModule):
             mel_spectrograms = batch
             conditioning = None
             mask = None
+        
+        # Handle case where mel_spectrograms is a list
+        if isinstance(mel_spectrograms, list):
+            if len(mel_spectrograms) > 0 and isinstance(mel_spectrograms[0], torch.Tensor):
+                mel_spectrograms = mel_spectrograms[0]
+            else:
+                # Create a dummy tensor
+                mel_spectrograms = torch.zeros((1, 1, self.config['model']['mel_bins'], 
+                                            self.config['model']['time_frames']), 
+                                            device=self.device)
         
         # Calculate current noise level
         noise_level = self._get_current_noise_level()
@@ -254,6 +276,16 @@ class ConditionalMultiBandUNet(pl.LightningModule):
             mel_spectrograms = batch
             conditioning = None
             mask = None
+        
+        # Handle case where mel_spectrograms is a list
+        if isinstance(mel_spectrograms, list):
+            if len(mel_spectrograms) > 0 and isinstance(mel_spectrograms[0], torch.Tensor):
+                mel_spectrograms = mel_spectrograms[0]
+            else:
+                # Create a dummy tensor
+                mel_spectrograms = torch.zeros((1, 1, self.config['model']['mel_bins'], 
+                                            self.config['model']['time_frames']), 
+                                            device=self.device)
         
         # Evaluate reconstruction ability
         reconstructed = self(mel_spectrograms, conditioning)

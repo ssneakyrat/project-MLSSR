@@ -332,6 +332,115 @@ class ConditionalMultiBandUNet(pl.LightningModule):
         
         return recon_loss
     
+    def _visualize_conditioning(self, conditioning, time_frames):
+        """
+        Visualize conditioning information
+        
+        Args:
+            conditioning: Dictionary of conditioning tensors
+            time_frames: Number of time frames in the mel spectrogram
+            
+        Returns:
+            Matplotlib figure with conditioning visualization
+        """
+        try:
+            # Check what conditioning information is available
+            has_phonemes = 'phoneme_ids' in conditioning and conditioning['phoneme_ids'] is not None
+            has_midi_pitch = 'midi_pitch' in conditioning and conditioning['midi_pitch'] is not None
+            has_f0 = 'f0' in conditioning and conditioning['f0'] is not None
+            
+            # Count how many plots we need
+            plot_count = sum([has_phonemes, has_midi_pitch, has_f0])
+            if plot_count == 0:
+                return None
+            
+            fig, axs = plt.subplots(plot_count, 1, figsize=(12, 3 * plot_count))
+            
+            # Handle single subplot case
+            if plot_count == 1:
+                axs = [axs]
+            
+            current_ax = 0
+            
+            # Plot phoneme information if available
+            if has_phonemes:
+                ax = axs[current_ax]
+                
+                # Get phoneme data
+                phoneme_ids = conditioning['phoneme_ids'][0].cpu().numpy()
+                phoneme_starts = conditioning['phoneme_starts'][0].cpu().numpy()
+                phoneme_ends = conditioning['phoneme_ends'][0].cpu().numpy()
+                
+                # Create a visualization of phoneme segments
+                phoneme_viz = np.zeros((50, time_frames))
+                for i, (start, end, phoneme_id) in enumerate(zip(phoneme_starts, phoneme_ends, phoneme_ids)):
+                    if start < time_frames and end > 0:
+                        # Ensure we're within valid range
+                        start_idx = max(0, int(start))
+                        end_idx = min(time_frames, int(end))
+                        if start_idx < end_idx:
+                            phoneme_viz[:, start_idx:end_idx] = phoneme_id + 1
+                
+                # Plot the phoneme segmentation
+                im = ax.imshow(phoneme_viz, aspect='auto', origin='lower', cmap='tab20c')
+                ax.set_yticks([25])
+                ax.set_yticklabels(["Phonemes"])
+                ax.set_title("Phoneme Conditioning")
+                
+                # Add phoneme IDs as text
+                prev_end = -100  # To avoid overlapping text
+                for i, (start, end, phoneme_id) in enumerate(zip(phoneme_starts, phoneme_ends, phoneme_ids)):
+                    if start < time_frames and end > 0:
+                        start_idx = max(0, int(start))
+                        end_idx = min(time_frames, int(end))
+                        if end_idx > start_idx:
+                            mid = (start_idx + end_idx) // 2
+                            if mid - prev_end > 20:  # Only add text if there's enough space
+                                ax.text(mid, 25, str(int(phoneme_id)), ha='center', va='center', fontsize=8,
+                                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+                                prev_end = mid
+                
+                current_ax += 1
+            
+            # Plot MIDI pitch if available
+            if has_midi_pitch:
+                ax = axs[current_ax]
+                
+                midi_pitch = conditioning['midi_pitch'][0].cpu().numpy()
+                
+                # Plot as a line chart
+                ax.plot(np.arange(len(midi_pitch)), midi_pitch, 'b-')
+                ax.set_title("MIDI Pitch Conditioning")
+                ax.set_ylabel("MIDI Note")
+                ax.set_ylim(0, 127)  # MIDI note range
+                
+                current_ax += 1
+            
+            # Plot F0 if available
+            if has_f0:
+                ax = axs[current_ax]
+                
+                f0 = conditioning['f0'][0].cpu().numpy()
+                
+                # Plot as a line chart
+                ax.plot(np.arange(len(f0)), f0, 'r-')
+                ax.set_title("F0 Conditioning")
+                ax.set_ylabel("F0 (Hz)")
+                ax.set_xlabel("Time Frames")
+                
+                # Set reasonable y-limits for F0
+                max_f0 = max(600, np.max(f0[f0 > 0]) * 1.1) if np.any(f0 > 0) else 600
+                ax.set_ylim(0, max_f0)
+                
+                current_ax += 1
+            
+            plt.tight_layout()
+            return fig
+            
+        except Exception as e:
+            print(f"Error visualizing conditioning: {e}")
+            return None
+        
     def _log_validation_results(self, original, reconstructed, denoised, conditioning=None):
         """Log validation spectrograms, reconstructions and generations"""
         try:
@@ -377,23 +486,34 @@ class ConditionalMultiBandUNet(pl.LightningModule):
                 
                 plt.close(fig)
                 
-            # Generate a sample from pure conditioning
+            # Log conditioning information and generate samples
             if conditioning is not None:
-                noise_level = self.noise_strategy.get_noise_level(self.global_step_counter)
-                
-                # Only generate if we're past the initial training phase
-                if noise_level > 0.5:
-                    # Take a single conditioning example
+                # Take a single conditioning example from each batch item
+                for i in range(min(2, original.size(0))):  # Limit to first 2 samples to avoid clutter
                     single_cond = {}
                     for key, value in conditioning.items():
                         if value is not None:
-                            single_cond[key] = value[0:1]  # Take first batch element
+                            single_cond[key] = value[i:i+1]  # Take the i-th batch element
                     
-                    # Generate from random noise
+                    # Visualize conditioning information
+                    fig = self._visualize_conditioning(single_cond, original.size(3))
+                    if fig is not None:
+                        # Convert the plot to a tensor for logging
+                        buf = io.BytesIO()
+                        plt.savefig(buf, format='png')
+                        buf.seek(0)
+                        img = Image.open(buf)
+                        img_tensor = torchvision.transforms.ToTensor()(img)
+                        
+                        # Log the image in TensorBoard
+                        self.logger.experiment.add_image(f'conditioning_{i}', img_tensor, self.global_step_counter)
+                        plt.close(fig)
+                    
+                    # Generate from conditioning
                     freq_bins = self.config['model']['mel_bins']
                     time_frames = original.size(3)
                     
-                    # Start with random noise
+                    # Generate from random noise with conditioning
                     with torch.no_grad():
                         device = original.device
                         seed = torch.randn(1, 1, freq_bins, time_frames, device=device)
@@ -405,7 +525,7 @@ class ConditionalMultiBandUNet(pl.LightningModule):
                         fig, axs = plt.subplots(1, 1, figsize=(10, 4))
                         gen_mel = generated[0, 0].cpu().numpy()
                         im = axs.imshow(gen_mel, origin='lower', aspect='auto', cmap='viridis')
-                        axs.set_title('Generated Mel Spectrogram from Noise + Conditioning')
+                        axs.set_title(f'Generated Mel Spectrogram (Sample {i})')
                         axs.set_xlabel('Time Frames')
                         axs.set_ylabel('Mel Bins')
                         plt.colorbar(im, ax=axs)
@@ -420,7 +540,7 @@ class ConditionalMultiBandUNet(pl.LightningModule):
                         img_tensor = torchvision.transforms.ToTensor()(img)
                         
                         # Log the image in TensorBoard
-                        self.logger.experiment.add_image('generated_sample', img_tensor, self.global_step_counter)
+                        self.logger.experiment.add_image(f'generated_sample_{i}', img_tensor, self.global_step_counter)
                         
                         plt.close(fig)
         

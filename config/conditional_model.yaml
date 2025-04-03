@@ -6,7 +6,7 @@ data:
   data_key: mel_spectrograms
   lazy_load: true
   raw_dir: datasets/gin
-  max_samples: 20
+  max_samples: 100
   sample_percentage: null
   variable_length: true
   
@@ -70,13 +70,13 @@ conditioning:
   
   # Noise conditioning parameters
   noise_schedule: "linear"  # 'linear' or 'cosine'
-  noise_steps: 1000
+  noise_steps: 10 #1000
   min_beta: 0.0001
   max_beta: 0.02
   
   # Noise level ramp (in steps)
   # Set how many steps to transition from pure reconstruction to noise conditioning
-  noise_ramp_steps: 10000
+  noise_ramp_steps: 10000 #10000
   
   # Minimum noise level to start with (0.0 = pure reconstruction)
   min_noise_level: 0.0 #0.0
@@ -84,7 +84,7 @@ conditioning:
 train:
   # Reduced batch size for the conditional model
   batch_size: 4
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 4
   num_epochs: 1000
   learning_rate: 0.0005
   weight_decay: 0.0001

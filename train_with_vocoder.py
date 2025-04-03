@@ -2,6 +2,10 @@ import os
 import argparse
 import torch
 import pytorch_lightning as pl
+# Add these imports at the top
+import torch.nn as nn
+import torch.nn.utils as nn_utils
+
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
@@ -30,7 +34,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     
     # Add arguments for two-phase training
-    parser.add_argument('--pretrain_unet_epochs', type=int, default=config['train']['pretrain_unet_epoch'], 
+    parser.add_argument('--pretrain_unet_epochs', type=int, default=None, 
                         help='Number of epochs to pretrain only the U-Net before joint training')
     parser.add_argument('--load_pretrained_unet', type=str, default=None,
                         help='Path to pretrained U-Net checkpoint to use instead of pretraining')
@@ -64,10 +68,10 @@ def main():
         torch.set_float32_matmul_precision(args.tc_precision)
         print(f"Using '{args.tc_precision}' precision for tensor core operations")
     
-    pl.seed_everything(args.seed)
+    pl.seed_everything(args.seed)    
     
     config = load_config(args.config)
-    
+
     # Apply command line overrides for standard parameters
     if args.batch_size:
         config['train']['batch_size'] = args.batch_size
@@ -106,6 +110,27 @@ def main():
     # Vocoder settings
     original_vocoder_enabled = config.get('vocoder', {}).get('enabled', True)
     
+    if 'vocoder' not in config:
+        config['vocoder'] = {}
+
+    # Set safer initial values for vocoder parameters if they don't exist
+    if 'lambda_adv' not in config['vocoder']:
+        config['vocoder']['lambda_adv'] = 0.5  # Start with a lower weight for adversarial loss
+    if 'lambda_fm' not in config['vocoder']:
+        config['vocoder']['lambda_fm'] = 1.0  # Reduced from 2.0
+    if 'lambda_mel' not in config['vocoder']:
+        config['vocoder']['lambda_mel'] = 45.0  # Keep this the same
+        
+    # Reduce learning rates to improve stability
+    if 'gen_lr' not in config['vocoder']:
+        config['vocoder']['gen_lr'] = 0.0001  # Reduced from 0.0002
+    if 'disc_lr' not in config['vocoder']:
+        config['vocoder']['disc_lr'] = 0.0001  # Reduced from 0.0002
+
+    # Increase discriminator start step to let generator stabilize first
+    if 'disc_start_step' not in config['vocoder']:
+        config['vocoder']['disc_start_step'] = 50000  # Increased from 10000
+        
     if args.disable_vocoder:
         if 'vocoder' not in config:
             config['vocoder'] = {}
@@ -140,6 +165,9 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     
     # First phase: Pretrain U-Net if needed
+    if args.pretrain_unet_epochs is None:
+        args.pretrain_unet_epochs = config['train']['pretrain_unet_epoch']
+    
     pretrained_unet_path = args.load_pretrained_unet
     
     if pretrained_unet_path is None and args.pretrain_unet_epochs > 0:
@@ -312,6 +340,10 @@ def main():
             'devices': 'auto',
             'precision': config['train'].get('precision', '32-true'),
             'benchmark': True,
+            # Add these new parameters:
+            'gradient_clip_val': 5.0,  # Clip gradients to prevent exploding gradients
+            'gradient_clip_algorithm': 'norm',  # Use norm-based clipping
+            'detect_anomaly': True,  # Enable anomaly detection for debugging
         }
         
         # Create trainer for joint training

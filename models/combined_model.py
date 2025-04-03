@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -633,7 +634,7 @@ class MultiBandUNetWithHiFiGAN(pl.LightningModule):
                 torch.save(combined_state, best_filepath)
                 print(f"New best model (val_loss={current_val_loss:.6f})! Saved all components to {best_filepath}")
             
-            print(f"Saved complete model checkpoint (UNet + vocoder) to TensorBoard directory")
+            #print(f"Saved complete model checkpoint (UNet + vocoder) to TensorBoard directory")
     
     def on_load_checkpoint(self, checkpoint):
         """Custom checkpoint loading"""

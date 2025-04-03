@@ -6,6 +6,10 @@ import math
 from tqdm import tqdm
 import argparse
 import logging
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+import io
+from PIL import Image
 
 from utils.utils import (
     load_config, 
@@ -65,16 +69,203 @@ def find_wav_file(lab_file_path, raw_dir):
     
     return None
 
+def time_to_frame(time_htk, sample_rate, hop_length):
+    """
+    Convert HTK-style time units (100ns) to mel spectrogram frame index
+    
+    Args:
+        time_htk: Time in HTK units (100ns)
+        sample_rate: Audio sample rate
+        hop_length: Hop length used in STFT
+        
+    Returns:
+        Frame index
+    """
+    # Convert HTK time units (100ns) to seconds
+    time_seconds = time_htk * 1e-7
+    
+    # Convert seconds to samples
+    time_samples = time_seconds * sample_rate
+    
+    # Convert samples to frames
+    frame_index = time_samples / hop_length
+    
+    return int(frame_index)
+
+def align_phonemes_to_frames(phonemes, mel_spec_length, sample_rate, hop_length):
+    """
+    Align phoneme boundaries to frame indices in mel spectrogram
+    
+    Args:
+        phonemes: List of (start_time, end_time, phoneme) tuples from lab file
+        mel_spec_length: The number of frames in the mel spectrogram (time dimension)
+        sample_rate: Audio sample rate
+        hop_length: Hop length used in STFT
+        
+    Returns:
+        Tuple of (frame_starts, frame_ends) arrays
+    """
+    frame_starts = []
+    frame_ends = []
+    phone_texts = []
+    
+    for start_time, end_time, phoneme in phonemes:
+        # Convert HTK time units to frames
+        start_frame = time_to_frame(start_time, sample_rate, hop_length)
+        end_frame = time_to_frame(end_time, sample_rate, hop_length)
+        
+        # Ensure frames are within mel spectrogram bounds
+        start_frame = max(0, min(start_frame, mel_spec_length - 1))
+        end_frame = max(start_frame + 1, min(end_frame, mel_spec_length))
+        
+        frame_starts.append(start_frame)
+        frame_ends.append(end_frame)
+        phone_texts.append(phoneme)
+    
+    return np.array(frame_starts), np.array(frame_ends), phone_texts
+
+def verify_phoneme_alignment(mel_spec, frame_starts, frame_ends, phone_texts, file_id, 
+                             output_dir=None, visualize=False):
+    """
+    Verify the quality of phoneme-to-frame alignment
+    
+    Args:
+        mel_spec: Mel spectrogram (freq_bins, time_frames)
+        frame_starts: Array of phoneme start frames
+        frame_ends: Array of phoneme end frames
+        phone_texts: List of phoneme labels
+        file_id: File identifier for logging
+        output_dir: Directory to save visualization plots (if visualize=True)
+        visualize: Whether to generate visualization plots
+        
+    Returns:
+        Dictionary with alignment quality metrics
+    """
+    if len(frame_starts) == 0:
+        logger.warning(f"No phonemes to verify in file {file_id}")
+        return {"status": "no_phonemes"}
+    
+    # Check for ordering issues
+    ordered = True
+    for i in range(len(frame_starts) - 1):
+        if frame_ends[i] > frame_starts[i+1]:
+            ordered = False
+            logger.warning(f"Phoneme ordering issue in {file_id}: {phone_texts[i]} and {phone_texts[i+1]} overlap")
+    
+    # Check for coverage
+    total_frames = mel_spec.shape[1]
+    covered_frames = 0
+    for start, end in zip(frame_starts, frame_ends):
+        covered_frames += (end - start)
+    
+    coverage_percent = (covered_frames / total_frames) * 100
+    
+    # Check for gaps
+    gaps = []
+    for i in range(len(frame_starts) - 1):
+        gap = frame_starts[i+1] - frame_ends[i]
+        if gap > 0:
+            gaps.append((gap, i))
+    
+    # Check for tiny segments
+    tiny_segments = []
+    for i, (start, end) in enumerate(zip(frame_starts, frame_ends)):
+        if (end - start) <= 1:
+            tiny_segments.append((i, phone_texts[i]))
+    
+    # Prepare results
+    results = {
+        "file_id": file_id,
+        "total_frames": total_frames,
+        "total_phonemes": len(frame_starts),
+        "coverage_percent": coverage_percent,
+        "ordered": ordered,
+        "gaps": len(gaps),
+        "tiny_segments": len(tiny_segments),
+        "status": "verified"
+    }
+    
+    # Log a summary
+    logger.info(f"Alignment verification for {file_id}: " +
+                f"{len(frame_starts)} phonemes, " +
+                f"{coverage_percent:.1f}% coverage, " +
+                f"ordered: {ordered}, " +
+                f"gaps: {len(gaps)}, " +
+                f"tiny segments: {len(tiny_segments)}")
+    
+    # Create visualization if requested
+    if visualize and output_dir is not None:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Create a visualization of the alignment
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
+            
+            # Plot the mel spectrogram
+            im = ax1.imshow(mel_spec, aspect='auto', origin='lower', cmap='viridis')
+            ax1.set_title(f"Mel Spectrogram and Phoneme Alignment: {file_id}")
+            ax1.set_ylabel("Mel Bins")
+            fig.colorbar(im, ax=ax1)
+            
+            # Create a colormap for phoneme visualization
+            n_phonemes = len(frame_starts)
+            colors = plt.cm.jet(np.linspace(0, 1, n_phonemes))
+            
+            # Create a phoneme segment visualization
+            phoneme_viz = np.zeros((50, total_frames))
+            for i, (start, end, phoneme) in enumerate(zip(frame_starts, frame_ends, phone_texts)):
+                phoneme_viz[:, start:end] = i + 1
+            
+            # Create a custom colormap with a transparent background for unaligned frames
+            cmap = plt.cm.jet
+            cmaplist = [cmap(i) for i in range(cmap.N)]
+            cmap = LinearSegmentedColormap.from_list('Custom cmap', cmaplist, cmap.N)
+            cmap.set_under('white', alpha=0.5)  # Color for values < vmin
+            
+            # Plot the phoneme segmentation
+            im2 = ax2.imshow(phoneme_viz, aspect='auto', origin='lower', cmap=cmap, 
+                            vmin=0.5, vmax=n_phonemes+0.5)
+            ax2.set_yticks([25])
+            ax2.set_yticklabels(["Phonemes"])
+            ax2.set_xlabel("Time Frames")
+            
+            # Add phoneme text labels
+            prev_end = -100  # To avoid overlapping text
+            for i, (start, end, phoneme) in enumerate(zip(frame_starts, frame_ends, phone_texts)):
+                mid = (start + end) // 2
+                if mid - prev_end > 20:  # Only add text if there's enough space
+                    ax2.text(mid, 25, phoneme, ha='center', va='center', fontsize=8,
+                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+                    prev_end = mid
+            
+            # Save the figure
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"{file_id}_alignment.png"), dpi=150)
+            plt.close(fig)
+            
+        except Exception as e:
+            logger.error(f"Error creating alignment visualization for {file_id}: {e}")
+    
+    return results
+
 def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_key='mel_spectrograms'):
     """Save mel spectrograms to H5 file with variable length support"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     mel_bins = config['model'].get('mel_bins', 80)
+    sample_rate = config['audio'].get('sample_rate', 22050)
+    hop_length = config['audio'].get('hop_length', 256)
+    
+    # Get alignment verification settings
+    verify_alignment = config.get('preprocessing', {}).get('verify_alignment', False)
+    visualize_alignment = config.get('preprocessing', {}).get('visualize_alignment', False)
+    alignment_vis_dir = config.get('preprocessing', {}).get('alignment_vis_dir', 'alignment_viz')
+    
+    if visualize_alignment:
+        os.makedirs(alignment_vis_dir, exist_ok=True)
     
     # Calculate max possible time frames for the maximum audio length
     max_audio_length = config['audio'].get('max_audio_length', 10.0)  # Default 10 seconds
-    sample_rate = config['audio'].get('sample_rate', 22050)
-    hop_length = config['audio'].get('hop_length', 256)
     max_time_frames = math.ceil(max_audio_length * sample_rate / hop_length)
     
     # Count valid items and get the maximum length
@@ -89,6 +280,17 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
     # Cap the maximum length to max_time_frames
     max_length = min(max_length, max_time_frames)
     logger.info(f"Maximum time frames: {max_length} (equivalent to {max_length * hop_length / sample_rate:.2f} seconds)")
+    
+    # Prepare for alignment statistics
+    if verify_alignment:
+        alignment_stats = {
+            'total_files': 0,
+            'coverage': [],
+            'ordered_count': 0,
+            'unordered_count': 0,
+            'files_with_gaps': 0,
+            'files_with_tiny_segments': 0
+        }
     
     with h5py.File(output_path, 'w') as f:
         # Store phone map
@@ -116,6 +318,33 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
             dtype=h5py.special_dtype(vlen=str)
         )
         
+        # New datasets for frame-aligned phoneme boundaries
+        phone_frame_starts = f.create_dataset(
+            'phone_frame_starts',
+            shape=(valid_items,),
+            dtype=h5py.vlen_dtype(np.int32)
+        )
+        
+        phone_frame_ends = f.create_dataset(
+            'phone_frame_ends',
+            shape=(valid_items,),
+            dtype=h5py.vlen_dtype(np.int32)
+        )
+        
+        phone_texts = f.create_dataset(
+            'phone_texts',
+            shape=(valid_items,),
+            dtype=h5py.vlen_dtype(h5py.special_dtype(vlen=str))
+        )
+        
+        # Dataset for alignment verification results if enabled
+        if verify_alignment:
+            alignment_quality = f.create_dataset(
+                'alignment_quality',
+                shape=(valid_items,),
+                dtype=np.float32
+            )
+        
         # Store audio parameters as attributes
         dataset.attrs['sample_rate'] = config['audio']['sample_rate']
         dataset.attrs['n_fft'] = config['audio']['n_fft']
@@ -137,6 +366,47 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
                     # Store the actual length
                     lengths_dataset[idx] = actual_length
                     
+                    # Convert phoneme times to frame indices
+                    phoneme_times = list(zip(file_info['PHONE_START'], 
+                                            file_info['PHONE_END'], 
+                                            file_info['PHONE_TEXT']))
+                    
+                    frame_starts, frame_ends, phoneme_label_list = align_phonemes_to_frames(
+                        phoneme_times,
+                        actual_length,
+                        sample_rate,
+                        hop_length
+                    )
+                    
+                    # Store the frame indices and phoneme labels
+                    phone_frame_starts[idx] = frame_starts
+                    phone_frame_ends[idx] = frame_ends
+                    phone_texts[idx] = np.array(phoneme_label_list)
+                    
+                    # Verify alignment if enabled
+                    if verify_alignment:
+                        alignment_results = verify_phoneme_alignment(
+                            mel_spec, 
+                            frame_starts, 
+                            frame_ends, 
+                            phoneme_label_list,
+                            file_id,
+                            alignment_vis_dir if visualize_alignment else None,
+                            visualize=visualize_alignment
+                        )
+                        
+                        # Store alignment quality metric (coverage percentage)
+                        alignment_quality[idx] = alignment_results['coverage_percent']
+                        
+                        # Update alignment statistics
+                        if alignment_results['status'] == 'verified':
+                            alignment_stats['total_files'] += 1
+                            alignment_stats['coverage'].append(alignment_results['coverage_percent'])
+                            alignment_stats['ordered_count'] += (1 if alignment_results['ordered'] else 0)
+                            alignment_stats['unordered_count'] += (0 if alignment_results['ordered'] else 1)
+                            alignment_stats['files_with_gaps'] += (1 if alignment_results['gaps'] > 0 else 0)
+                            alignment_stats['files_with_tiny_segments'] += (1 if alignment_results['tiny_segments'] > 0 else 0)
+                    
                     # Pad or truncate to max_length
                     if mel_spec.shape[1] > max_length:
                         # Truncate if longer than max_length
@@ -155,6 +425,20 @@ def save_to_h5_variable_length(output_path, file_data, phone_map, config, data_k
                 pbar.update(1)
     
     logger.info(f"Saved {idx} mel spectrograms to {output_path} with variable length support")
+    logger.info(f"Added frame-aligned phoneme boundaries")
+    
+    # Log alignment statistics if verification was enabled
+    if verify_alignment and alignment_stats['total_files'] > 0:
+        mean_coverage = sum(alignment_stats['coverage']) / len(alignment_stats['coverage'])
+        logger.info(f"Alignment statistics:")
+        logger.info(f"  - Files processed: {alignment_stats['total_files']}")
+        logger.info(f"  - Average coverage: {mean_coverage:.2f}%")
+        logger.info(f"  - Files with correctly ordered phonemes: {alignment_stats['ordered_count']} ({alignment_stats['ordered_count']/alignment_stats['total_files']*100:.1f}%)")
+        logger.info(f"  - Files with gaps between phonemes: {alignment_stats['files_with_gaps']} ({alignment_stats['files_with_gaps']/alignment_stats['total_files']*100:.1f}%)")
+        logger.info(f"  - Files with tiny phoneme segments: {alignment_stats['files_with_tiny_segments']} ({alignment_stats['files_with_tiny_segments']/alignment_stats['total_files']*100:.1f}%)")
+        
+        if visualize_alignment:
+            logger.info(f"Alignment visualizations saved to: {alignment_vis_dir}")
 
 def collect_unique_phonemes(lab_files):
     unique_phonemes = set()
@@ -182,6 +466,9 @@ def main():
     parser.add_argument('--target_bins', type=int, default=None, help='Target mel bins')
     parser.add_argument('--variable_length', action='store_true', help='Enable variable length mel spectrograms')
     parser.add_argument('--max_audio_length', type=float, default=None, help='Maximum audio length in seconds')
+    parser.add_argument('--verify_alignment', action='store_true', help='Verify phoneme-to-frame alignment')
+    parser.add_argument('--visualize_alignment', action='store_true', help='Generate alignment visualizations')
+    parser.add_argument('--alignment_vis_dir', type=str, default='alignment_viz', help='Directory for alignment visualizations')
     args = parser.parse_args()
     
     config = load_config(args.config)
@@ -218,6 +505,14 @@ def main():
     target_shape = None
     if args.target_length is not None and args.target_bins is not None:
         target_shape = (args.target_bins, args.target_length)
+    
+    # Configure alignment verification settings
+    if 'preprocessing' not in config:
+        config['preprocessing'] = {}
+    
+    config['preprocessing']['verify_alignment'] = args.verify_alignment
+    config['preprocessing']['visualize_alignment'] = args.visualize_alignment
+    config['preprocessing']['alignment_vis_dir'] = args.alignment_vis_dir
     
     lab_files = list_lab_files(raw_dir)
     
@@ -278,6 +573,8 @@ def main():
         if variable_length:
             save_to_h5_variable_length(output_path, all_file_data, phone_map, config, args.data_key)
         else:
+            # Original save_to_h5 function (not modified for this example)
+            logger.warning("Fixed-length mode does not support frame-aligned phoneme boundaries yet.")
             save_to_h5(output_path, all_file_data, phone_map, config, args.data_key, target_shape)
     else:
         logger.warning("No files were processed. H5 file was not created.")

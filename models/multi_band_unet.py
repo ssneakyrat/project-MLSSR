@@ -612,14 +612,14 @@ class FrequencyBandSplitter(nn.Module):
     def split(self, x):
         """Split the input spectrogram into frequency bands
         Args:
-            x: Input of shape [batch, channels, time, frequency]
+            x: Input of shape [batch, channels, freq_bins, time_frames]
         Returns:
             List of tensors, each with a portion of the frequency range
         """
         band_outputs = []
         for start, end in self.band_boundaries:
-            # Extract the frequency band
-            band = x[:, :, :, start:end]
+            # Extract the frequency band - preserve all channels
+            band = x[:, :, start:end, :]  # Changed indexing order to match expected dimensions
             band_outputs.append(band)
         return band_outputs
     
@@ -631,7 +631,7 @@ class FrequencyBandSplitter(nn.Module):
         Returns:
             Merged tensor with shape matching original_shape
         """
-        batch, channels, time, freq = original_shape
+        batch, channels, freq_bins, time_frames = original_shape
         output = torch.zeros(original_shape, device=band_outputs[0].device)
         
         # Get normalized weights for band combination
@@ -642,14 +642,17 @@ class FrequencyBandSplitter(nn.Module):
         
         # Apply the masks and add contributions
         for i, ((start, end), mask) in enumerate(zip(self.band_boundaries, band_masks)):
-            # Pad the band output to match the target slice size
+            # Handle the band output
             band_output = band_outputs[i]
             
+            # Debug print for band output shape
+            print(f"Band {i} output shape for merge: {band_output.shape}, target slice: [{channels}, {start}:{end}, :]")
+            
             # Handle potential dimension mismatch
-            if band_output.shape[3] != (end - start):
+            if band_output.shape[2] != (end - start):
                 band_output = F.interpolate(
                     band_output, 
-                    size=(time, end - start),
+                    size=(end - start, time_frames),
                     mode='bilinear', 
                     align_corners=False
                 )
@@ -657,18 +660,21 @@ class FrequencyBandSplitter(nn.Module):
             # Apply band-specific weight
             weighted_output = band_output * weights[i]
             
+            # Expand mask to match channel dimensions
+            expanded_mask = mask.unsqueeze(0).unsqueeze(0).expand(batch, channels, -1, time_frames)
+            
             # Apply the mask and add to the correct position in the output
-            output[:, :, :, start:end] += weighted_output * mask
+            output[:, :, start:end, :] += weighted_output * expanded_mask
             
         return output
     
     def _create_overlap_masks(self, original_shape):
         """Create masks for smooth band transitions in overlapping regions"""
-        _, _, _, freq = original_shape
+        _, _, freq, _ = original_shape
         masks = []
         
         for i, (start, end) in enumerate(self.band_boundaries):
-            # Create a mask of ones
+            # Create a mask of ones for this frequency band
             mask = torch.ones(end - start, device=self.band_weights.device)
             
             # Add fade-in if not the first band
@@ -697,9 +703,8 @@ class FrequencyBandSplitter(nn.Module):
 class MultiBandUNet(UNetResidualDualPath):
     """U-Net model with separate processing paths for different frequency bands"""
     def __init__(self, config, in_channels=None):
-
         self.input_channels = in_channels or 1
-
+        
         # Initialize with the parent class first
         super().__init__(config)
         
@@ -718,12 +723,12 @@ class MultiBandUNet(UNetResidualDualPath):
         self._setup_band_specific_paths()
         
         # Create fusion module to combine full-spectrum and band-specific outputs
-        # IMPORTANT CHANGE: Use self.input_channels to determine fusion module input channels
+        # IMPORTANT: Make sure output channels match input_channels
         self.fusion = nn.Sequential(
-            nn.Conv2d(self.input_channels * 2, 16, kernel_size=3, padding=1),  # Adjust for input channels
+            nn.Conv2d(self.input_channels * 2, 16, kernel_size=3, padding=1),
             nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Conv2d(16, self.input_channels, kernel_size=1),  # <-- Update this line to match input_channels
             nn.Sigmoid()
         )
         
@@ -736,10 +741,11 @@ class MultiBandUNet(UNetResidualDualPath):
         
         # Configuration for band-specific paths
         # We'll make them simpler than the main path
-        # IMPORTANT CHANGE: Use self.input_channels instead of hardcoding 1
         reduced_encoder_channels = [self.input_channels] + [max(16, c // 2) for c in self.encoder_channels[1:]]
         reduced_bottleneck_channels = max(32, self.bottleneck_channels // 2)
-        reduced_decoder_channels = [max(16, c // 2) for c in self.decoder_channels[:-1]] + [1]
+        reduced_decoder_channels = [max(16, c // 2) for c in self.decoder_channels[:-1]] + [self.input_channels]
+        
+        print(f"Band paths - input channels: {self.input_channels}, final decoder channels: {reduced_decoder_channels[-1]}")
         
         # For each frequency band
         for band_idx in range(self.num_bands):
@@ -854,18 +860,22 @@ class MultiBandUNet(UNetResidualDualPath):
             else:
                 print(f"Cannot process list input: {x}")
                 # Return a dummy tensor as a fallback (batch_size=1, mel_bins from config)
-                dummy_output = torch.zeros((1, 1, self.config['model']['mel_bins'], 
+                dummy_output = torch.zeros((1, self.input_channels, self.config['model']['mel_bins'], 
                                         self.config['model']['time_frames']), 
                                         device=self.device)
                 return dummy_output
         
         # Now x should be a tensor
-        batch_size, channels, time_frames, freq_bins = x.shape
+        batch_size, channels, freq_bins, time_frames = x.shape
+        
+        # Add debug print for input
+        print(f"MultiBandUNet input shape: {x.shape}")
         
         # 1. Process full spectrogram with the parent class's encoder-decoder
-        # Instead of calling super().forward(x), use our reimplemented method
         try:
             full_output = self.process_full_spectrogram(x)
+            # Debug print
+            print(f"Full output shape: {full_output.shape}")
         except Exception as e:
             print(f"Error in full spectrogram processing: {e}")
             # Return input as output if processing fails
@@ -908,6 +918,9 @@ class MultiBandUNet(UNetResidualDualPath):
                 
                 # Store the processed band
                 band_outputs.append(band_x)
+                # Debug print for first band
+                if band_idx == 0:
+                    print(f"Band {band_idx} output shape: {band_x.shape}")
                 
             except RuntimeError as e:
                 print(f"Error processing band {band_idx}: {e}")
@@ -918,6 +931,8 @@ class MultiBandUNet(UNetResidualDualPath):
         # 4. Merge band outputs
         try:
             band_merged = self.band_splitter.merge(band_outputs, x.shape)
+            # Debug print
+            print(f"Band merged shape: {band_merged.shape}")
         except Exception as e:
             print(f"Error merging bands: {e}")
             # Fall back to using a copy of the full output as the merged output
@@ -939,9 +954,14 @@ class MultiBandUNet(UNetResidualDualPath):
                 # If resizing fails, just use full output by itself
                 return full_output
         
+        # Debug print for concatenated input to fusion
+        print(f"Cat shapes - full_output: {full_output.shape}, band_merged: {band_merged.shape}")
+        
         try:
             # Simplify - only fuse the full output and the merged bands
-            fused_output = self.fusion(torch.cat([full_output, band_merged], dim=1))
+            concat_input = torch.cat([full_output, band_merged], dim=1)
+            print(f"Concat shape: {concat_input.shape}, expected by fusion: {self.input_channels * 2} channels")
+            fused_output = self.fusion(concat_input)
         except RuntimeError as e:
             print(f"Error in fusion: {e}")
             # Fall back to using only the full output

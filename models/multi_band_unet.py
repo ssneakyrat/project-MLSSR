@@ -1056,25 +1056,30 @@ class MultiBandUNet(UNetResidualDualPath):
             print(f"Concat shape: {concat_input.shape}")
             fused_output = self.fusion(concat_input)
             
-            # Ensure output has the correct shape
-            if fused_output.shape != orig_shape and fused_output.shape[2:] != orig_shape[2:]:
+            # OPTION 1: IMPLEMENTATION - Ensure output has the same channel dimension as the input
+            print(f"Fused output shape before adaptation: {fused_output.shape}, Original input shape: {orig_shape}")
+            if fused_output.shape[1] != orig_shape[1]:
+                print(f"Adapting channel dimension from {fused_output.shape[1]} to {orig_shape[1]}")
+                if fused_output.shape[1] == 1 and orig_shape[1] > 1:
+                    # Duplicate the single channel
+                    fused_output = fused_output.repeat(1, orig_shape[1], 1, 1)
+                    print(f"Duplicated single channel to {fused_output.shape[1]} channels")
+                elif fused_output.shape[1] > orig_shape[1]:
+                    # Take the first channels
+                    fused_output = fused_output[:, :orig_shape[1], :, :]
+                    print(f"Truncated to first {orig_shape[1]} channels")
+            
+            # Ensure output has the correct spatial dimensions
+            if fused_output.shape[2:] != orig_shape[2:]:
+                print(f"Resizing spatial dimensions from {fused_output.shape[2:]} to {orig_shape[2:]}")
                 fused_output = F.interpolate(
                     fused_output,
                     size=(orig_shape[2], orig_shape[3]),
                     mode='bilinear',
                     align_corners=False
                 )
-                
-            # Ensure output has the same channel dimension as the input
-            if fused_output.shape[1] != orig_shape[1]:
-                # Adapt the output channel dimension
-                if fused_output.shape[1] == 1 and orig_shape[1] > 1:
-                    # Duplicate the single channel
-                    fused_output = fused_output.repeat(1, orig_shape[1], 1, 1)
-                elif fused_output.shape[1] > orig_shape[1]:
-                    # Take the first channels
-                    fused_output = fused_output[:, :orig_shape[1], :, :]
             
+            print(f"Final output shape: {fused_output.shape}")
             return fused_output
                 
         except RuntimeError as e:

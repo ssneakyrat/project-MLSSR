@@ -715,10 +715,12 @@ class FrequencyBandSplitter(nn.Module):
 class MultiBandUNet(UNetResidualDualPath):
     """Simplified version that fixes the fusion channel mismatch"""
     def __init__(self, config, in_channels=None):
-        super().__init__(config)
-        # Set input channels - handle both explicitly set value and config
+        # Set input channels before calling parent constructor
         self.input_channels = in_channels if in_channels is not None else 1
-        print(f"MultiBandUNet initialized with input_channels={self.input_channels}")        
+        print(f"MultiBandUNet initialized with input_channels={self.input_channels}")
+        
+        # Now call parent constructor which will use self.input_channels in _setup_channels
+        super().__init__(config)
         
         # Add multi-band specific config
         self.num_bands = config['model'].get('num_freq_bands', 4)

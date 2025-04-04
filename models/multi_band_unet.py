@@ -557,7 +557,7 @@ class UNetResidualDualPath(UNetBase):
             return self._forward_impl(x)
 
 class FrequencyBandSplitter(nn.Module):
-    """Fixed implementation of FrequencyBandSplitter to handle band merging issues"""
+    """Splits and merges mel spectrograms into frequency bands"""
     def __init__(self, mel_bins, num_bands=4, overlap_ratio=0.1):
         super().__init__()
         self.mel_bins = mel_bins
@@ -573,7 +573,6 @@ class FrequencyBandSplitter(nn.Module):
     def _calculate_band_boundaries(self):
         """Calculate band boundaries with logarithmic spacing to match human hearing"""
         # Use logarithmic spacing for more natural frequency bands
-        # This gives more resolution to lower frequencies
         import numpy as np
         log_min = np.log(1)
         log_max = np.log(self.mel_bins)
@@ -625,7 +624,7 @@ class FrequencyBandSplitter(nn.Module):
         return band_outputs
     
     def merge(self, band_outputs, original_shape):
-        """Robust merge function with proper time dimension handling and error checks
+        """Robust merge function with proper time and frequency dimension handling
         
         Args:
             band_outputs: List of tensors, one per frequency band
@@ -640,14 +639,16 @@ class FrequencyBandSplitter(nn.Module):
         # Get normalized weights for band combination
         weights = F.softmax(self.band_weights, dim=0)
         
-        # Create overlap masks for smooth transitions
-        band_masks = self._create_overlap_masks(original_shape)
-        
-        # Apply the masks and add contributions
-        for i, ((start, end), mask) in enumerate(zip(self.band_boundaries, band_masks)):
+        # Apply the band outputs to the corresponding regions with proper weighting
+        for i, (start, end) in enumerate(self.band_boundaries):
             try:
                 # Handle the band output
                 band_output = band_outputs[i]
+                
+                # Skip bands that are too small
+                if band_output.shape[2] < 2 or band_output.shape[3] < 2:
+                    print(f"Skipping band {i} with too small dimensions: {band_output.shape}")
+                    continue
                 
                 # Ensure time dimension matches using interpolation if needed
                 if band_output.shape[3] != time_frames:
@@ -670,49 +671,52 @@ class FrequencyBandSplitter(nn.Module):
                 # Apply band-specific weight
                 weighted_output = band_output * weights[i]
                 
-                # Expand mask to match channel dimensions
-                expanded_mask = mask.unsqueeze(0).unsqueeze(0).expand(batch, channels, -1, time_frames)
+                # Create overlap mask for smooth transitions
+                mask = torch.ones(end - start, device=band_output.device)
                 
-                # Apply the mask and add to the correct position in the output
-                output[:, :, start:end, :] += weighted_output * expanded_mask
+                # Add fade-in if not the first band
+                if i > 0:
+                    prev_end = self.band_boundaries[i-1][1]
+                    if start < prev_end:  # There's an overlap
+                        overlap_size = prev_end - start
+                        if overlap_size > 0 and overlap_size < len(mask):
+                            # Linear fade-in over the overlap region
+                            fade_in = torch.linspace(0, 1, overlap_size, device=mask.device)
+                            mask[:overlap_size] = fade_in
+                
+                # Add fade-out if not the last band
+                if i < len(self.band_boundaries) - 1:
+                    next_start = self.band_boundaries[i+1][0]
+                    if end > next_start:  # There's an overlap
+                        overlap_size = end - next_start
+                        if overlap_size > 0 and overlap_size < len(mask):
+                            # Linear fade-out over the overlap region
+                            fade_out = torch.linspace(1, 0, overlap_size, device=mask.device)
+                            mask[-overlap_size:] = fade_out
+                
+                # Apply the mask by reshaping and broadcasting
+                # The key fix is here - carefully reshaping the mask for broadcasting
+                mask_shaped = mask.view(1, 1, -1, 1).expand(-1, -1, -1, time_frames)
+                if mask_shaped.shape[2] != weighted_output.shape[2]:
+                    print(f"Warning: Mask shape mismatch: {mask_shaped.shape} vs {weighted_output.shape}")
+                    # Emergency reshape to match
+                    mask_shaped = F.interpolate(
+                        mask_shaped, 
+                        size=(weighted_output.shape[2], time_frames),
+                        mode='nearest'
+                    )
+                
+                masked_output = weighted_output * mask_shaped
+                
+                # Add to the output tensor in the appropriate frequency region
+                output[:, :, start:end, :] += masked_output
                 
             except Exception as e:
                 print(f"Error processing band {i} during merge: {e}")
-                # Skip this band
+                # Skip this band if there's an error
                 continue
-            
-        return output
-    
-    def _create_overlap_masks(self, original_shape):
-        """Create masks for smooth band transitions in overlapping regions"""
-        _, _, freq, _ = original_shape
-        masks = []
         
-        for i, (start, end) in enumerate(self.band_boundaries):
-            # Create a mask of ones for this frequency band
-            mask = torch.ones(end - start, device=self.band_weights.device)
-            
-            # Add fade-in if not the first band
-            if i > 0:
-                prev_end = self.band_boundaries[i-1][1]
-                if start < prev_end:  # There's an overlap
-                    overlap_size = prev_end - start
-                    # Linear fade-in over the overlap region
-                    fade_in = torch.linspace(0, 1, overlap_size, device=mask.device)
-                    mask[:overlap_size] = fade_in
-            
-            # Add fade-out if not the last band
-            if i < len(self.band_boundaries) - 1:
-                next_start = self.band_boundaries[i+1][0]
-                if end > next_start:  # There's an overlap
-                    overlap_size = end - next_start
-                    # Linear fade-out over the overlap region
-                    fade_out = torch.linspace(1, 0, overlap_size, device=mask.device)
-                    mask[-overlap_size:] = fade_out
-            
-            masks.append(mask)
-            
-        return masks
+        return output
 
 
 class MultiBandUNet(UNetResidualDualPath):
@@ -878,7 +882,7 @@ class MultiBandUNet(UNetResidualDualPath):
             Processed band output tensor
         """
         # Skip bands that are too small to process
-        if band_input.size(2) < 4 or band_input.size(3) < 4:
+        if band_input.size(2) < 8 or band_input.size(3) < 8:  # Increased minimum size requirement
             print(f"Band {band_idx} is too small to process: {band_input.shape}")
             return torch.zeros_like(band_input)
         
@@ -908,18 +912,18 @@ class MultiBandUNet(UNetResidualDualPath):
             for i, decoder in enumerate(self.band_decoders[band_idx]):
                 skip = skip_connections[self.layer_count - 1 - i]
                 
-                # Ensure band_x and skip have compatible time dimensions
-                if band_x.shape[3] != skip.shape[3]:
+                # Ensure both band_x and skip have compatible spatial dimensions
+                if band_x.shape[2] != skip.shape[2] or band_x.shape[3] != skip.shape[3]:
                     band_x = F.interpolate(
                         band_x,
-                        size=(band_x.size(2), skip.size(3)),
+                        size=(skip.shape[2], skip.shape[3]),
                         mode='bilinear',
                         align_corners=False
                     )
                 
                 band_x = decoder(band_x, skip)
             
-            # Ensure final output has correct time dimension
+            # Ensure final output has correct time dimension and exactly one channel
             if band_x.size(3) != time_frames:
                 band_x = F.interpolate(
                     band_x,
@@ -928,42 +932,29 @@ class MultiBandUNet(UNetResidualDualPath):
                     align_corners=False
                 )
             
+            # Reduce to a single channel if needed
+            if band_x.size(1) > 1:
+                band_x = band_x[:, :1, :, :]
+            
             return band_x
         
         except Exception as e:
             print(f"Error processing band {band_idx}: {e}")
-            # Return input as fallback or zeros if needed
-            if band_input.size(3) == time_frames:
-                return band_input
-            else:
-                # Try to resize input to match expected dimensions
-                try:
-                    resized = F.interpolate(
-                        band_input,
-                        size=(band_input.size(2), time_frames),
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                    return resized
-                except Exception as resize_error:
-                    print(f"Fallback resizing also failed: {resize_error}")
-                    # Last resort: zeros
-                    return torch.zeros(
-                        band_input.size(0),
-                        band_input.size(1),
-                        band_input.size(2),
-                        time_frames,
-                        device=band_input.device
-                    )
+            # Return zeros with correct dimensions
+            return torch.zeros(
+                band_input.size(0),
+                1,  # Always return one channel
+                band_input.size(2),
+                time_frames,
+                device=band_input.device
+            )
                 
     def forward(self, x):
         """Forward pass with robust band processing and error handling"""
         # Debug input shape
-        print(f"MultiBandUNet input shape: {x.shape}")
+        orig_shape = x.shape
+        print(f"MultiBandUNet input shape: {orig_shape}")
         
-        # Save original input channels for later
-        actual_input_channels = x.shape[1]
-
         # Check the input type and handle it appropriately
         if isinstance(x, list):
             print(f"Input is a list of length {len(x)}")
@@ -974,7 +965,7 @@ class MultiBandUNet(UNetResidualDualPath):
             else:
                 print(f"Cannot process list input: {x}")
                 # Return a dummy tensor as a fallback
-                dummy_output = torch.zeros((1, self.input_channels, self.config['model']['mel_bins'], 
+                dummy_output = torch.zeros((1, 1, self.config['model']['mel_bins'], 
                                         self.config['model']['time_frames']), 
                                         device=self.device)
                 return dummy_output
@@ -1010,44 +1001,51 @@ class MultiBandUNet(UNetResidualDualPath):
         
         # 4. Merge band outputs
         try:
-            band_merged = self.band_splitter.merge(band_outputs, x.shape)
+            # Important: ensure all band outputs have the same channel dimension
+            for i in range(len(band_outputs)):
+                if band_outputs[i].shape[1] != 1:
+                    band_outputs[i] = band_outputs[i][:, :1, :, :]
+                    
+            # Create a target shape with exactly 1 channel for merging
+            merge_shape = (batch_size, 1, freq_bins, time_frames)
+            band_merged = self.band_splitter.merge(band_outputs, merge_shape)
             print(f"Band merged shape: {band_merged.shape}")
         except Exception as e:
             print(f"Error merging bands: {e}")
             # Fall back to using the full output
             band_merged = full_output.clone()
+            if band_merged.shape[1] != 1:
+                band_merged = band_merged[:, :1, :, :]
         
         # 5. Combine full spectrum and band-specific processing with the fusion module
-        # Check shape match
+        # Check shape match and ensure single channel for each
+        if full_output.shape[1] != 1:
+            full_output = full_output[:, :1, :, :]
+        
+        if band_merged.shape[1] != 1:
+            band_merged = band_merged[:, :1, :, :]
+            
+        # Ensure spatial dimensions match
         if full_output.shape[2:] != band_merged.shape[2:]:
             print(f"Shape mismatch between full output {full_output.shape} and merged bands {band_merged.shape}")
             try:
-                # Resize the smaller to match the larger
-                if full_output.numel() < band_merged.numel():
-                    full_output = F.interpolate(
-                        full_output,
-                        size=band_merged.shape[2:],
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                else:
-                    band_merged = F.interpolate(
-                        band_merged,
-                        size=full_output.shape[2:],
-                        mode='bilinear',
-                        align_corners=False
-                    )
+                # Resize to match the original input shape dimensions
+                full_output = F.interpolate(
+                    full_output,
+                    size=(freq_bins, time_frames),
+                    mode='bilinear',
+                    align_corners=False
+                )
+                band_merged = F.interpolate(
+                    band_merged,
+                    size=(freq_bins, time_frames),
+                    mode='bilinear',
+                    align_corners=False
+                )
             except Exception as e:
                 print(f"Error resizing for fusion: {e}")
                 # If resizing fails, just use full output
                 return full_output
-        
-        # Ensure both tensors have channel dim = 1 for concatenation
-        if full_output.shape[1] != 1:
-            full_output = full_output[:, :1]
-        
-        if band_merged.shape[1] != 1:
-            band_merged = band_merged[:, :1]
         
         # Debug concatenation shapes
         print(f"Cat shapes - full_output: {full_output.shape}, band_merged: {band_merged.shape}")
@@ -1058,20 +1056,27 @@ class MultiBandUNet(UNetResidualDualPath):
             print(f"Concat shape: {concat_input.shape}")
             fused_output = self.fusion(concat_input)
             
+            # Ensure output has the correct shape
+            if fused_output.shape != orig_shape and fused_output.shape[2:] != orig_shape[2:]:
+                fused_output = F.interpolate(
+                    fused_output,
+                    size=(orig_shape[2], orig_shape[3]),
+                    mode='bilinear',
+                    align_corners=False
+                )
+                
             # Ensure output has the same channel dimension as the input
-            if fused_output.shape[1] != actual_input_channels:
-                # Adapt the output channel dimension if needed
-                if fused_output.shape[1] < actual_input_channels:
-                    # Duplicate channels
-                    repeats = [1] * fused_output.dim()
-                    repeats[1] = actual_input_channels // fused_output.shape[1]
-                    fused_output = fused_output.repeat(*repeats)
-                else:
-                    # Select first channels
-                    fused_output = fused_output[:, :actual_input_channels]
+            if fused_output.shape[1] != orig_shape[1]:
+                # Adapt the output channel dimension
+                if fused_output.shape[1] == 1 and orig_shape[1] > 1:
+                    # Duplicate the single channel
+                    fused_output = fused_output.repeat(1, orig_shape[1], 1, 1)
+                elif fused_output.shape[1] > orig_shape[1]:
+                    # Take the first channels
+                    fused_output = fused_output[:, :orig_shape[1], :, :]
             
             return fused_output
-            
+                
         except RuntimeError as e:
             print(f"Error in fusion: {e}")
             # Fall back to returning full_output
